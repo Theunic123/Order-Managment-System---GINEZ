@@ -71,7 +71,6 @@ def inicializar_bd():
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         
-        # Tabla Usuarios (Ahora incluye correo)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +81,6 @@ def inicializar_bd():
             )
         """)
 
-        # Tabla Bitácora (Auditoría)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bitacora (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +91,6 @@ def inicializar_bd():
             )
         """)
 
-        # Tabla Movimientos (Incluye Activo para Soft Delete)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS movimientos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +114,6 @@ def inicializar_bd():
             )
         """)
 
-        # Crear Súper-Admin por defecto
         cursor.execute("SELECT COUNT(*) FROM usuarios")
         if cursor.fetchone()[0] == 0:
             usuarios_prueba = [
@@ -185,20 +181,29 @@ st.session_state.permiso_edicion = (st.session_state.rol in roles_jefes)
 st.session_state.permiso_financiero = (st.session_state.rol in roles_jefes)
 
 def guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, destino, fecha, es_oc):
+    """Guarda archivos con lógica HÍBRIDA: OneDrive (Local) o Directorio Temporal (Nube)"""
     ruta_pdf, ruta_excel = None, None
     fecha_fmt = fecha.strftime("%Y%m%d") if fecha else datetime.date.today().strftime("%Y%m%d")
     
+    # Detección de entorno: Si existe el disco C en Windows, usa OneDrive. Si no (Linux/Nube), usa temporal.
+    if os.path.exists(r"C:\\"):
+        base_p = BASE_PEDIDOS
+        base_t = BASE_TRASPASOS
+    else:
+        base_p = "cloud_docs/pedidos"
+        base_t = "cloud_docs/traspasos"
+
     if es_oc:
         prov_limpio = str(proveedor).strip().upper() if proveedor else "SIN_PROVEEDOR"
-        directorio_meta = os.path.join(BASE_PEDIDOS, prov_limpio)
+        directorio_meta = os.path.join(base_p, prov_limpio)
     else:
         dest_limpio = str(destino).strip().upper() if destino else "SIN_DESTINO"
-        directorio_meta = os.path.join(BASE_TRASPASOS, dest_limpio)
+        directorio_meta = os.path.join(base_t, dest_limpio)
         
     try:
         os.makedirs(directorio_meta, exist_ok=True)
     except Exception as e:
-        st.error(f"Error carpetas locales: {e}")
+        st.error(f"Error al crear carpetas de almacenamiento: {e}")
         return None, None
         
     if archivo_pdf is not None:
@@ -363,6 +368,48 @@ def modal_editar_registro(df_mov):
             st.session_state.mensaje_exito = f"🗑️ Movimiento {folio_editar} movido a la papelera."
             st.rerun()
 
+@st.dialog("📄 Gestor de Documentos", width="large")
+def modal_ver_documento(df_mov):
+    folios_disponibles = df_mov['Folio'].tolist()
+    if not folios_disponibles:
+        st.info("No hay registros.")
+        return
+        
+    folio_selec = st.selectbox("🔍 Selecciona el Folio para ver/descargar sus documentos:", [""] + folios_disponibles)
+    
+    if folio_selec:
+        registro = df_mov[df_mov['Folio'] == folio_selec].iloc[0]
+        ruta_pdf = registro.get('Ruta_PDF', None)
+        ruta_excel = registro.get('Ruta_Excel', None)
+        
+        st.markdown(f"### Documentos de: {folio_selec}")
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.markdown("#### 📄 Documento Principal (PDF)")
+            if pd.notna(ruta_pdf) and os.path.exists(str(ruta_pdf)):
+                with open(ruta_pdf, "rb") as f:
+                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="400" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+                
+                with open(ruta_pdf, "rb") as f:
+                    st.download_button(label="📥 Descargar PDF", data=f, file_name=f"{folio_selec}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            else:
+                st.warning("⚠️ El PDF no se encontró en el servidor de la nube.")
+
+        with c2:
+            st.markdown("#### 📊 Matriz de Distribución")
+            if pd.notna(ruta_excel) and os.path.exists(str(ruta_excel)):
+                st.success("✅ Archivo de Excel ubicado exitosamente.")
+                with open(ruta_excel, "rb") as f:
+                    st.download_button(label="📥 Descargar Excel", data=f, file_name=os.path.basename(str(ruta_excel)), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+            else:
+                if registro['Tipo_Doc'] == 'TR':
+                    st.info("ℹ️ Los traspasos (TR) no llevan hoja de distribución anexa.")
+                else:
+                    st.warning("⚠️ El archivo Excel no se encontró en el servidor.")
+
 
 # ==========================================
 # ESTRUCTURA PRINCIPAL E INTERFAZ
@@ -400,13 +447,16 @@ if st.session_state.is_admin:
 # PESTAÑA 1: PANEL PRINCIPAL (SEMÁFORO)
 # ------------------------------------------
 with tab_panel:
-    c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 2])
+    c_btn1, c_btn2, c_btn3, c_btn4 = st.columns([1, 1, 1, 1])
     with c_btn1:
         if st.session_state.permiso_edicion:
             if st.button("➕ Nuevo Registro", use_container_width=True): modal_nuevo_registro()
     with c_btn2:
         if st.session_state.permiso_edicion:
             if st.button("✏️ Editar / Eliminar", use_container_width=True): modal_editar_registro(df_movimientos)
+    with c_btn3:
+        # Botón de documentos visible para todos los roles
+        if st.button("📄 Ver Documentos", use_container_width=True): modal_ver_documento(df_movimientos)
 
     st.markdown("---")
     
@@ -448,6 +498,8 @@ with tab_panel:
         df_visual = df_movimientos[cols_visibles].rename(columns={'Factura': 'UUID / Remisión'})
         
         st.dataframe(df_visual, width='stretch', hide_index=True)
+
+
 # ------------------------------------------
 # PESTAÑA 2: CALENDARIO LOGÍSTICO
 # ------------------------------------------
@@ -502,6 +554,7 @@ with tab_calendario:
                     
                 html_contenido += "</div>"
                 cols_dias[i].markdown(html_contenido, unsafe_allow_html=True)
+
 
 # ------------------------------------------
 # PESTAÑA 3: MI PERFIL (Cambio de Credenciales)
