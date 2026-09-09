@@ -448,7 +448,60 @@ with tab_panel:
         df_visual = df_movimientos[cols_visibles].rename(columns={'Factura': 'UUID / Remisión'})
         
         st.dataframe(df_visual, width='stretch', hide_index=True)
+# ------------------------------------------
+# PESTAÑA 2: CALENDARIO LOGÍSTICO
+# ------------------------------------------
+with tab_calendario:
+    st.markdown("### 📅 Programación y Recepción de Mercancía")
+    hoy = datetime.date.today()
+    col_mes, col_anio, _ = st.columns([1, 1, 3])
+    with col_mes:
+        meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        mes_sel = st.selectbox("Mes", range(1, 13), index=hoy.month - 1, format_func=lambda x: meses[x-1])
+    with col_anio:
+        anio_sel = st.selectbox("Año", range(hoy.year - 1, hoy.year + 2), index=1)
+        
+    st.markdown("""
+        <style>
+        .cal-header { text-align: center; font-weight: bold; padding: 10px 0; border-bottom: 2px solid rgba(128,128,128,0.3); background-color: rgba(128,128,128,0.1); }
+        .cal-cell { border: 1px solid rgba(128,128,128,0.2); min-height: 120px; padding: 5px; margin-bottom: 10px; border-radius: 4px; display: flex; flex-direction: column;}
+        .cal-today { border: 2px solid #E2231A; background-color: rgba(226, 35, 26, 0.05); }
+        .cal-date { font-weight: bold; font-size: 1.1em; margin-bottom: 8px; opacity: 0.7; text-align: right;}
+        .badge-pend { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; border-radius: 3px; padding: 3px 5px; font-size: 0.75em; margin-bottom: 3px; font-weight: 600;}
+        .badge-ok { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 3px; padding: 3px 5px; font-size: 0.75em; margin-bottom: 3px; font-weight: 600; text-decoration: line-through opacity 0.5;}
+        </style>
+    """, unsafe_allow_html=True)
 
+    dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    cols_header = st.columns(7)
+    for i, col in enumerate(cols_header):
+        col.markdown(f"<div class='cal-header'>{dias_semana[i]}</div>", unsafe_allow_html=True)
+    
+    cal_matrix = calendar.monthcalendar(anio_sel, mes_sel)
+    
+    for semana in cal_matrix:
+        cols_dias = st.columns(7)
+        for i, dia in enumerate(semana):
+            if dia == 0:
+                cols_dias[i].markdown("<div class='cal-cell' style='background-color: transparent; border: none;'></div>", unsafe_allow_html=True)
+            else:
+                fecha_iteracion = datetime.date(anio_sel, mes_sel, dia)
+                str_fecha = fecha_iteracion.strftime("%Y-%m-%d")
+                es_hoy = (fecha_iteracion == hoy)
+                
+                clase_celda = "cal-cell cal-today" if es_hoy else "cal-cell"
+                html_contenido = f"<div class='{clase_celda}'><div class='cal-date'>{dia}</div>"
+                
+                pendientes = df_movimientos[(df_movimientos['Entrega'] == str_fecha) & (df_movimientos['Estatus'].isin(['Programado', 'Solicitado']))]
+                recibidos = df_movimientos[(df_movimientos['Recepcion'] == str_fecha) & (df_movimientos['Estatus'] == 'Recibido')]
+                
+                for _, row in pendientes.iterrows():
+                    html_contenido += f"<div class='badge-pend'>🕒 {row['Folio']} ({row['Destino']})</div>"
+                for _, row in recibidos.iterrows():
+                    html_contenido += f"<div class='badge-ok'>✅ {row['Folio']} ({row['Destino']})</div>"
+                    
+                html_contenido += "</div>"
+                cols_dias[i].markdown(html_contenido, unsafe_allow_html=True)
 
 # ------------------------------------------
 # PESTAÑA 3: MI PERFIL (Cambio de Credenciales)
