@@ -27,9 +27,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-BASE_PEDIDOS = r"C:\Users\gvargas\OPERADORA GINEZ DE MEXICO\Joseline Lopez Garcia - Planeación de la demanda\PEDIDOS"
-BASE_TRASPASOS = r"C:\Users\gvargas\OPERADORA GINEZ DE MEXICO\Joseline Lopez Garcia - Planeación de la demanda\TRASPASOS"
-
 # ==========================================
 # CONEXIÓN A SUPABASE (NUBE PERSISTENTE)
 # ==========================================
@@ -51,7 +48,6 @@ def registrar_bitacora(usuario, accion, detalle):
     fecha_hora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     supabase.table('bitacora').insert({"fecha": fecha_hora, "usuario": usuario, "accion": accion, "detalle": detalle}).execute()
 
-# Inicializar Súper-Admin si la BD está vacía
 def check_initial_admin():
     res = supabase.table('usuarios').select('id', count='exact').execute()
     if res.count == 0:
@@ -118,34 +114,41 @@ st.session_state.is_admin = (st.session_state.rol == "Admin Master")
 st.session_state.permiso_edicion = (st.session_state.rol in roles_jefes)
 st.session_state.permiso_financiero = (st.session_state.rol in roles_jefes)
 
+# ---------------------------------------------------------
+# MODIFICACIÓN FINAL: Guardar archivos directo en Supabase Storage
+# ---------------------------------------------------------
 def guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, destino, fecha, es_oc):
     ruta_pdf, ruta_excel = None, None
     fecha_fmt = fecha.strftime("%Y%m%d") if fecha else datetime.date.today().strftime("%Y%m%d")
-    
-    if os.path.exists(r"C:\\"):
-        base_p, base_t = BASE_PEDIDOS, BASE_TRASPASOS
-    else:
-        base_p, base_t = "cloud_docs/pedidos", "cloud_docs/traspasos"
+    bucket = "documentos" # El bucket público que acabas de crear
 
     if es_oc:
-        prov_limpio = str(proveedor).strip().upper() if proveedor else "SIN_PROVEEDOR"
-        directorio_meta = os.path.join(base_p, prov_limpio)
+        prov_limpio = str(proveedor).strip().upper().replace(" ", "_") if proveedor else "SIN_PROVEEDOR"
+        base_path = f"pedidos/{prov_limpio}"
     else:
-        dest_limpio = str(destino).strip().upper() if destino else "SIN_DESTINO"
-        directorio_meta = os.path.join(base_t, dest_limpio)
+        dest_limpio = str(destino).strip().upper().replace(" ", "_") if destino else "SIN_DESTINO"
+        base_path = f"traspasos/{dest_limpio}"
         
-    try:
-        os.makedirs(directorio_meta, exist_ok=True)
-    except Exception as e:
-        st.error(f"Error al crear carpetas: {e}")
-        return None, None
-        
+    def safe_upload(path, f_bytes, c_type):
+        try: 
+            # Borrar si ya existe (para cuando editamos y subimos uno nuevo)
+            supabase.storage.from_(bucket).remove([path])
+        except: 
+            pass
+        # Subir el archivo a la nube
+        supabase.storage.from_(bucket).upload(path, f_bytes, file_options={"content-type": c_type})
+        # Obtener el link público que se guardará en la tabla
+        return supabase.storage.from_(bucket).get_public_url(path)
+
     if archivo_pdf is not None:
-        ruta_pdf = os.path.join(directorio_meta, f"{folio}.pdf")
-        with open(ruta_pdf, "wb") as f: f.write(archivo_pdf.getbuffer())
+        path_pdf = f"{base_path}/{folio}.pdf"
+        ruta_pdf = safe_upload(path_pdf, archivo_pdf.getvalue(), "application/pdf")
+        
     if es_oc and archivo_excel is not None:
-        ruta_excel = os.path.join(directorio_meta, f"{prov_limpio}_{fecha_fmt}.xlsx")
-        with open(ruta_excel, "wb") as f: f.write(archivo_excel.getbuffer())
+        ext = archivo_excel.name.split('.')[-1]
+        path_excel = f"{base_path}/{prov_limpio}_{fecha_fmt}.{ext}"
+        c_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "application/vnd.ms-excel"
+        ruta_excel = safe_upload(path_excel, archivo_excel.getvalue(), c_type)
             
     return ruta_pdf, ruta_excel
 
@@ -194,7 +197,7 @@ def modal_nuevo_registro():
             if not folio.strip(): 
                 st.error("⚠️ Folio obligatorio.")
             else:
-                check_folio = supabase.table('movimientos').select('Folio').eq('Folio', folio).execute()
+                check_folio = supabase.table('movimientos').select('"Folio"').eq('"Folio"', folio).execute()
                 if len(check_folio.data) > 0:
                     st.error("❌ El Folio ya existe en la base de datos.")
                 else:
@@ -283,18 +286,21 @@ def modal_editar_registro(df_mov):
                     "Calidad": nueva_calidad, "Monto": nuevo_monto, "F_Pago": nuevo_fpago,
                     "Est_Pago": nuevo_estpago, "Ruta_PDF": ruta_pdf_bd, "Ruta_Excel": ruta_excel_bd
                 }
-                supabase.table('movimientos').update(data_update).eq('Folio', folio_editar).execute()
+                supabase.table('movimientos').update(data_update).eq('"Folio"', folio_editar).execute()
                 registrar_bitacora(st.session_state.username, "ACTUALIZACIÓN", f"Se editó el folio {folio_editar}.")
                 st.session_state.mensaje_exito = f"🔄 Movimiento {folio_editar} actualizado."
                 st.rerun()
 
         # Botón de ELIMINACIÓN LÓGICA (Soft Delete)
         if st.button("🗑️ Enviar a Papelera (Ocultar)", type="primary", use_container_width=True):
-            supabase.table('movimientos').update({"Activo": 0}).eq('Folio', folio_editar).execute()
+            supabase.table('movimientos').update({"Activo": 0}).eq('"Folio"', folio_editar).execute()
             registrar_bitacora(st.session_state.username, "ELIMINACIÓN (Soft)", f"Se ocultó el folio {folio_editar}.")
             st.session_state.mensaje_exito = f"🗑️ Movimiento {folio_editar} movido a la papelera."
             st.rerun()
 
+# ---------------------------------------------------------
+# LECTOR DE ARCHIVOS DESDE URL DE LA NUBE
+# ---------------------------------------------------------
 @st.dialog("📄 Gestor de Documentos", width="large")
 def modal_ver_documento(df_mov):
     folios_disponibles = df_mov['Folio'].tolist()
@@ -313,25 +319,21 @@ def modal_ver_documento(df_mov):
         
         with c1:
             st.markdown("#### 📄 Documento Principal (PDF)")
-            if pd.notna(ruta_pdf) and os.path.exists(str(ruta_pdf)):
-                with open(ruta_pdf, "rb") as f:
-                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="400" type="application/pdf"></iframe>'
+            if pd.notna(ruta_pdf) and str(ruta_pdf).startswith("http"):
+                pdf_display = f'<iframe src="{ruta_pdf}" width="100%" height="400" type="application/pdf"></iframe>'
                 st.markdown(pdf_display, unsafe_allow_html=True)
-                with open(ruta_pdf, "rb") as f:
-                    st.download_button(label="📥 Descargar PDF", data=f, file_name=f"{folio_selec}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+                st.markdown(f"**[📥 Haz clic aquí para descargar el PDF]({ruta_pdf})**")
             else:
-                st.warning("⚠️ El PDF no se encontró en el servidor de la nube.")
+                st.warning("⚠️ No hay PDF adjunto en la base de datos.")
 
         with c2:
             st.markdown("#### 📊 Matriz de Distribución")
-            if pd.notna(ruta_excel) and os.path.exists(str(ruta_excel)):
+            if pd.notna(ruta_excel) and str(ruta_excel).startswith("http"):
                 st.success("✅ Archivo de Excel ubicado exitosamente.")
-                with open(ruta_excel, "rb") as f:
-                    st.download_button(label="📥 Descargar Excel", data=f, file_name=os.path.basename(str(ruta_excel)), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+                st.markdown(f"**[📥 Haz clic aquí para descargar el Excel]({ruta_excel})**")
             else:
                 if registro['Tipo_Doc'] == 'TR': st.info("ℹ️ Los traspasos (TR) no llevan hoja de distribución anexa.")
-                else: st.warning("⚠️ El archivo Excel no se encontró en el servidor.")
+                else: st.warning("⚠️ No hay archivo Excel adjunto.")
 
 # ==========================================
 # ESTRUCTURA PRINCIPAL E INTERFAZ
@@ -350,7 +352,7 @@ if "mensaje_exito" in st.session_state:
     del st.session_state.mensaje_exito
 
 # Cargar BD de Supabase
-res_movimientos = supabase.table('movimientos').select('*').eq('Activo', 1).execute()
+res_movimientos = supabase.table('movimientos').select('*').eq('"Activo"', 1).execute()
 df_movimientos = pd.DataFrame(res_movimientos.data)
 if df_movimientos.empty:
     df_movimientos = pd.DataFrame(columns=["id", "Folio", "Proveedor", "Fecha", "Estatus", "Entrega", "Recepcion", "Obs", "Destino", "Factura", "Calidad", "Monto", "F_Pago", "Est_Pago", "Tipo_Doc", "Ruta_PDF", "Ruta_Excel", "Activo"])
@@ -519,14 +521,14 @@ if st.session_state.is_admin:
             st.dataframe(df_bitacora, height=400, hide_index=True)
 
             st.markdown("#### 🗑️ Papelera de Reciclaje (Registros Ocultos)")
-            res_borrados = supabase.table('movimientos').select('Folio, Proveedor, Destino, Estatus').eq('Activo', 0).execute()
+            res_borrados = supabase.table('movimientos').select('Folio, Proveedor, Destino, Estatus').eq('"Activo"', 0).execute()
             df_borrados = pd.DataFrame(res_borrados.data)
             
             if not df_borrados.empty:
                 st.dataframe(df_borrados, hide_index=True)
                 restaurar_folio = st.selectbox("Selecciona un folio para restaurar", df_borrados['Folio'])
                 if st.button("Restaurar Folio"):
-                    supabase.table('movimientos').update({"Activo": 1}).eq('Folio', restaurar_folio).execute()
+                    supabase.table('movimientos').update({"Activo": 1}).eq('"Folio"', restaurar_folio).execute()
                     registrar_bitacora("Admin", "RESTAURACIÓN", f"Restauró el folio {restaurar_folio}.")
                     st.rerun()
             else:
