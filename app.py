@@ -52,10 +52,9 @@ def check_initial_admin():
     res = supabase.table('usuarios').select('id', count='exact').execute()
     if res.count == 0:
         pass_admin = st.secrets.get("ADMIN_PASS", "clave_local_123")
+        # MODIFICACIÓN 1: Solo se crea el Súper-Admin por defecto
         usuarios_prueba = [
-            {"username": "ginezti", "password": hash_password(pass_admin), "rol": "Admin Master", "correo": "N/A"},
-            {"username": "jefe_cedis", "password": hash_password("jefe123"), "rol": "Jefe de Área", "correo": "jefe@ginez.com"},
-            {"username": "gerente_suc", "password": hash_password("gerente123"), "rol": "Gerente de Sucursal", "correo": "gerente@ginez.com"}
+            {"username": "ginezti", "password": hash_password(pass_admin), "rol": "Admin Master", "correo": "N/A"}
         ]
         supabase.table('usuarios').insert(usuarios_prueba).execute()
 
@@ -115,12 +114,12 @@ st.session_state.permiso_edicion = (st.session_state.rol in roles_jefes)
 st.session_state.permiso_financiero = (st.session_state.rol in roles_jefes)
 
 # ---------------------------------------------------------
-# MODIFICACIÓN FINAL: Guardar archivos directo en Supabase Storage
+# GUARDAR ARCHIVOS EN SUPABASE STORAGE
 # ---------------------------------------------------------
 def guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, destino, fecha, es_oc):
     ruta_pdf, ruta_excel = None, None
     fecha_fmt = fecha.strftime("%Y%m%d") if fecha else datetime.date.today().strftime("%Y%m%d")
-    bucket = "documentos" # El bucket público que acabas de crear
+    bucket = "documentos" 
 
     if es_oc:
         prov_limpio = str(proveedor).strip().upper().replace(" ", "_") if proveedor else "SIN_PROVEEDOR"
@@ -131,13 +130,10 @@ def guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, desti
         
     def safe_upload(path, f_bytes, c_type):
         try: 
-            # Borrar si ya existe (para cuando editamos y subimos uno nuevo)
             supabase.storage.from_(bucket).remove([path])
         except: 
             pass
-        # Subir el archivo a la nube
         supabase.storage.from_(bucket).upload(path, f_bytes, file_options={"content-type": c_type})
-        # Obtener el link público que se guardará en la tabla
         return supabase.storage.from_(bucket).get_public_url(path)
 
     if archivo_pdf is not None:
@@ -417,7 +413,7 @@ with tab_panel:
         st.dataframe(df_visual, width='stretch', hide_index=True)
 
 # ------------------------------------------
-# PESTAÑA 2: CALENDARIO LOGÍSTICO
+# PESTAÑA 2: CALENDARIO LOGÍSTICO (MODIFICACIÓN 2: PROVEEDOR)
 # ------------------------------------------
 with tab_calendario:
     st.markdown("### 📅 Programación y Recepción de Mercancía")
@@ -464,9 +460,11 @@ with tab_calendario:
                 recibidos = df_movimientos[(df_movimientos['Recepcion'] == str_fecha) & (df_movimientos['Estatus'] == 'Recibido')]
                 
                 for _, row in pendientes.iterrows():
-                    html_contenido += f"<div class='badge-pend'>🕒 {row['Folio']} ({row['Destino']})</div>"
+                    prov_str = "Traspaso" if row['Tipo_Doc'] == 'TR' else (str(row['Proveedor']).strip() if pd.notna(row['Proveedor']) and str(row['Proveedor']).strip() != "" else "Sin Proveedor")
+                    html_contenido += f"<div class='badge-pend'>🕒 {row['Folio']} ({row['Destino']})<br><span style='font-size: 0.85em; font-weight: normal;'>🏢 {prov_str}</span></div>"
                 for _, row in recibidos.iterrows():
-                    html_contenido += f"<div class='badge-ok'>✅ {row['Folio']} ({row['Destino']})</div>"
+                    prov_str = "Traspaso" if row['Tipo_Doc'] == 'TR' else (str(row['Proveedor']).strip() if pd.notna(row['Proveedor']) and str(row['Proveedor']).strip() != "" else "Sin Proveedor")
+                    html_contenido += f"<div class='badge-ok'>✅ {row['Folio']} ({row['Destino']})<br><span style='font-size: 0.85em; font-weight: normal;'>🏢 {prov_str}</span></div>"
                     
                 html_contenido += "</div>"
                 cols_dias[i].markdown(html_contenido, unsafe_allow_html=True)
