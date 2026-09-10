@@ -114,10 +114,15 @@ def inicializar_bd():
             )
         """)
 
+        # ---------------------------------------------------------
+        # MODIFICACIÓN DE SEGURIDAD: Leer contraseña desde los secretos
+        # ---------------------------------------------------------
         cursor.execute("SELECT COUNT(*) FROM usuarios")
         if cursor.fetchone()[0] == 0:
+            pass_admin = st.secrets["ADMIN_PASS"] if "ADMIN_PASS" in st.secrets else "clave_local_123"
+            
             usuarios_prueba = [
-                ("ginezti", hash_password("jarciginez"), "Admin Master", "N/A"),
+                ("ginezti", hash_password(pass_admin), "Admin Master", "N/A"),
                 ("jefe_cedis", hash_password("jefe123"), "Jefe de Área", "jefe@ginez.com"),
                 ("gerente_suc", hash_password("gerente123"), "Gerente de Sucursal", "gerente@ginez.com"),
             ]
