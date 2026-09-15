@@ -1,4 +1,7 @@
-streamlit
-pandas
 openpyxl
-supabase
+xlsxwriter
+numpy
+scipy
+scikit-learn
+xgboost
+statsmodels
