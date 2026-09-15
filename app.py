@@ -52,7 +52,6 @@ def check_initial_admin():
     res = supabase.table('usuarios').select('id', count='exact').execute()
     if res.count == 0:
         pass_admin = st.secrets.get("ADMIN_PASS", "clave_local_123")
-        # MODIFICACIÓN 1: Solo se crea el Súper-Admin por defecto
         usuarios_prueba = [
             {"username": "ginezti", "password": hash_password(pass_admin), "rol": "Admin Master", "correo": "N/A"}
         ]
@@ -114,10 +113,10 @@ st.session_state.permiso_edicion = (st.session_state.rol in roles_jefes)
 st.session_state.permiso_financiero = (st.session_state.rol in roles_jefes)
 
 # ---------------------------------------------------------
-# GUARDAR ARCHIVOS EN SUPABASE STORAGE
+# GUARDAR ARCHIVOS EN SUPABASE STORAGE (Actualizado para 4 archivos)
 # ---------------------------------------------------------
-def guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, destino, fecha, es_oc):
-    ruta_pdf, ruta_excel = None, None
+def guardar_archivos_fisicos(archivo_pdf, archivo_excel, archivo_pdf_sp, archivo_factura, folio, proveedor, destino, fecha, es_oc):
+    ruta_pdf, ruta_excel, ruta_pdf_sp, ruta_factura = None, None, None, None
     fecha_fmt = fecha.strftime("%Y%m%d") if fecha else datetime.date.today().strftime("%Y%m%d")
     bucket = "documentos" 
 
@@ -129,24 +128,32 @@ def guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, desti
         base_path = f"traspasos/{dest_limpio}"
         
     def safe_upload(path, f_bytes, c_type):
-        try: 
-            supabase.storage.from_(bucket).remove([path])
-        except: 
-            pass
+        try: supabase.storage.from_(bucket).remove([path])
+        except: pass
         supabase.storage.from_(bucket).upload(path, f_bytes, file_options={"content-type": c_type})
         return supabase.storage.from_(bucket).get_public_url(path)
 
+    # 1. OC Interna (Con Precios)
     if archivo_pdf is not None:
-        path_pdf = f"{base_path}/{folio}.pdf"
-        ruta_pdf = safe_upload(path_pdf, archivo_pdf.getvalue(), "application/pdf")
+        ruta_pdf = safe_upload(f"{base_path}/{folio}_interna.pdf", archivo_pdf.getvalue(), "application/pdf")
         
+    # 2. Distribución Excel
     if es_oc and archivo_excel is not None:
         ext = archivo_excel.name.split('.')[-1]
-        path_excel = f"{base_path}/{prov_limpio}_{fecha_fmt}.{ext}"
         c_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "application/vnd.ms-excel"
-        ruta_excel = safe_upload(path_excel, archivo_excel.getvalue(), c_type)
+        ruta_excel = safe_upload(f"{base_path}/{prov_limpio}_{fecha_fmt}.{ext}", archivo_excel.getvalue(), c_type)
+        
+    # 3. OC Proveedor (Sin Precios)
+    if es_oc and archivo_pdf_sp is not None:
+        ruta_pdf_sp = safe_upload(f"{base_path}/{folio}_proveedor.pdf", archivo_pdf_sp.getvalue(), "application/pdf")
+        
+    # 4. Factura o Nota de Remisión
+    if es_oc and archivo_factura is not None:
+        ext = archivo_factura.name.split('.')[-1].lower()
+        c_type = "application/pdf" if ext == "pdf" else f"image/{ext}"
+        ruta_factura = safe_upload(f"{base_path}/{folio}_factura.{ext}", archivo_factura.getvalue(), c_type)
             
-    return ruta_pdf, ruta_excel
+    return ruta_pdf, ruta_excel, ruta_pdf_sp, ruta_factura
 
 # ==========================================
 # MODALES DE INTERACCIÓN
@@ -170,7 +177,7 @@ def modal_nuevo_registro():
         with c3:
             destino = st.selectbox("Destino", ["CEDIS", "Actopan", "Mixquiahuala", "Pachuca", "Querétaro", "Oaxaca", "Veracruz"])
             calidad = st.selectbox("Calidad en Recepción", ["N/A", "Completo", "Parcial", "Dañado"])
-            obs = st.text_input("Observaciones")
+            obs = st.text_input("Observaciones (Ej. Faltantes en descarga)")
 
         if es_oc:
             st.markdown("---")
@@ -184,10 +191,21 @@ def modal_nuevo_registro():
 
         st.markdown("#### 📂 Anexar Documentos")
         col_docs1, col_docs2 = st.columns(2)
-        with col_docs1: archivo_pdf = st.file_uploader("📄 Subir PDF", type=["pdf"])
+        
+        with col_docs1: 
+            archivo_pdf = st.file_uploader("📄 OC Interna (Con precios)", type=["pdf"])
+            if es_oc:
+                archivo_pdf_sp = st.file_uploader("📄 OC Proveedor (Sin precios)", type=["pdf"])
+            else:
+                archivo_pdf_sp = None
+                
         with col_docs2:
-            if es_oc: archivo_excel = st.file_uploader("📊 Subir Distribución", type=["xlsx", "xls"])
-            else: archivo_excel = None
+            if es_oc: 
+                archivo_excel = st.file_uploader("📊 Distribución (Excel)", type=["xlsx", "xls"])
+                archivo_factura = st.file_uploader("🧾 Factura / Remisión Física (Recibo CEDIS)", type=["pdf", "jpg", "jpeg", "png"])
+            else: 
+                archivo_excel = None
+                archivo_factura = None
 
         if st.form_submit_button("💾 Guardar", type="primary", use_container_width=True):
             if not folio.strip(): 
@@ -197,14 +215,16 @@ def modal_nuevo_registro():
                 if len(check_folio.data) > 0:
                     st.error("❌ El Folio ya existe en la base de datos.")
                 else:
-                    ruta_pdf_final, ruta_excel_final = guardar_archivos_fisicos(archivo_pdf, archivo_excel, folio, proveedor, destino, fecha, es_oc)
+                    r_pdf, r_exc, r_pdf_sp, r_fac = guardar_archivos_fisicos(archivo_pdf, archivo_excel, archivo_pdf_sp, archivo_factura, folio, proveedor, destino, fecha, es_oc)
                     data_insert = {
                         "Folio": folio, "Proveedor": proveedor, "Fecha": fecha.strftime("%Y-%m-%d"),
                         "Estatus": estatus, "Entrega": entrega.strftime("%Y-%m-%d") if entrega else None,
                         "Recepcion": recepcion.strftime("%Y-%m-%d") if recepcion else None,
                         "Obs": obs, "Destino": destino, "Factura": factura, "Calidad": calidad,
                         "Monto": monto, "F_Pago": f_pago, "Est_Pago": est_pago, "Tipo_Doc": tipo_doc_bd,
-                        "Ruta_PDF": ruta_pdf_final, "Ruta_Excel": ruta_excel_final, "Activo": 1
+                        "Ruta_PDF": r_pdf, "Ruta_Excel": r_exc, 
+                        "Ruta_PDF_SinPrecios": r_pdf_sp, "Ruta_Factura": r_fac, 
+                        "Activo": 1
                     }
                     supabase.table('movimientos').insert(data_insert).execute()
                     registrar_bitacora(st.session_state.username, "CREACIÓN", f"Se creó el folio {folio}.")
@@ -260,19 +280,34 @@ def modal_editar_registro(df_mov):
             else:
                 nuevo_monto, nueva_factura, nuevo_fpago, nuevo_estpago = 0.0, None, None, None
 
-            st.markdown("#### 📂 Reemplazar Documentos")
+            st.markdown("#### 📂 Reemplazar / Añadir Documentos")
             c_doc1, c_doc2 = st.columns(2)
-            with c_doc1: nuevo_pdf = st.file_uploader("Sobrescribir PDF", type=["pdf"])
-            with c_doc2: nuevo_excel = st.file_uploader("Sobrescribir Excel", type=["xlsx", "xls"]) if es_oc_edit else None
+            with c_doc1: 
+                nuevo_pdf = st.file_uploader("Sobrescribir OC Interna", type=["pdf"])
+                if es_oc_edit:
+                    nuevo_pdf_sp = st.file_uploader("Sobrescribir OC Proveedor", type=["pdf"])
+                else: nuevo_pdf_sp = None
+                
+            with c_doc2: 
+                if es_oc_edit:
+                    nuevo_excel = st.file_uploader("Sobrescribir Distribución", type=["xlsx", "xls"]) 
+                    nueva_factura_doc = st.file_uploader("Añadir / Sobrescribir Factura Física", type=["pdf", "jpg", "jpeg", "png"])
+                else: 
+                    nuevo_excel = None
+                    nueva_factura_doc = None
 
             if st.form_submit_button("🔄 Actualizar", type="primary", use_container_width=True):
                 ruta_pdf_bd = registro['Ruta_PDF']
                 ruta_excel_bd = registro.get('Ruta_Excel', None)
+                ruta_pdf_sp_bd = registro.get('Ruta_PDF_SinPrecios', None)
+                ruta_fac_bd = registro.get('Ruta_Factura', None)
 
-                if nuevo_pdf is not None or nuevo_excel is not None:
-                    n_pdf, n_excel = guardar_archivos_fisicos(nuevo_pdf, nuevo_excel, folio_editar, nuevo_proveedor, nuevo_destino, nueva_fecha, es_oc_edit)
-                    if nuevo_pdf is not None: ruta_pdf_bd = n_pdf
-                    if nuevo_excel is not None: ruta_excel_bd = n_excel
+                if nuevo_pdf or nuevo_excel or nuevo_pdf_sp or nueva_factura_doc:
+                    n_pdf, n_exc, n_pdf_sp, n_fac = guardar_archivos_fisicos(nuevo_pdf, nuevo_excel, nuevo_pdf_sp, nueva_factura_doc, folio_editar, nuevo_proveedor, nuevo_destino, nueva_fecha, es_oc_edit)
+                    if nuevo_pdf: ruta_pdf_bd = n_pdf
+                    if nuevo_excel: ruta_excel_bd = n_exc
+                    if nuevo_pdf_sp: ruta_pdf_sp_bd = n_pdf_sp
+                    if nueva_factura_doc: ruta_fac_bd = n_fac
 
                 data_update = {
                     "Proveedor": nuevo_proveedor, "Fecha": nueva_fecha.strftime("%Y-%m-%d") if nueva_fecha else None,
@@ -280,7 +315,8 @@ def modal_editar_registro(df_mov):
                     "Recepcion": nueva_recepcion.strftime("%Y-%m-%d") if nueva_recepcion else None,
                     "Obs": nueva_obs, "Destino": nuevo_destino, "Factura": nueva_factura,
                     "Calidad": nueva_calidad, "Monto": nuevo_monto, "F_Pago": nuevo_fpago,
-                    "Est_Pago": nuevo_estpago, "Ruta_PDF": ruta_pdf_bd, "Ruta_Excel": ruta_excel_bd
+                    "Est_Pago": nuevo_estpago, "Ruta_PDF": ruta_pdf_bd, "Ruta_Excel": ruta_excel_bd,
+                    "Ruta_PDF_SinPrecios": ruta_pdf_sp_bd, "Ruta_Factura": ruta_fac_bd
                 }
                 supabase.table('movimientos').update(data_update).eq('"Folio"', folio_editar).execute()
                 registrar_bitacora(st.session_state.username, "ACTUALIZACIÓN", f"Se editó el folio {folio_editar}.")
@@ -295,7 +331,7 @@ def modal_editar_registro(df_mov):
             st.rerun()
 
 # ---------------------------------------------------------
-# LECTOR DE ARCHIVOS DESDE URL DE LA NUBE
+# LECTOR DE ARCHIVOS DESDE URL DE LA NUBE (4 Archivos)
 # ---------------------------------------------------------
 @st.dialog("📄 Gestor de Documentos", width="large")
 def modal_ver_documento(df_mov):
@@ -309,27 +345,57 @@ def modal_ver_documento(df_mov):
         registro = df_mov[df_mov['Folio'] == folio_selec].iloc[0]
         ruta_pdf = registro.get('Ruta_PDF', None)
         ruta_excel = registro.get('Ruta_Excel', None)
+        ruta_pdf_sp = registro.get('Ruta_PDF_SinPrecios', None)
+        ruta_fac = registro.get('Ruta_Factura', None)
         
         st.markdown(f"### Documentos de: {folio_selec}")
-        c1, c2 = st.columns(2)
         
+        # Fila 1: OC Interna y Excel
+        c1, c2 = st.columns(2)
         with c1:
-            st.markdown("#### 📄 Documento Principal (PDF)")
+            st.markdown("#### 📄 OC Interna (Con Precios)")
             if pd.notna(ruta_pdf) and str(ruta_pdf).startswith("http"):
-                pdf_display = f'<iframe src="{ruta_pdf}" width="100%" height="400" type="application/pdf"></iframe>'
+                pdf_display = f'<iframe src="{ruta_pdf}" width="100%" height="300" type="application/pdf"></iframe>'
                 st.markdown(pdf_display, unsafe_allow_html=True)
-                st.markdown(f"**[📥 Haz clic aquí para descargar el PDF]({ruta_pdf})**")
+                st.markdown(f"**[📥 Descargar OC Interna]({ruta_pdf})**")
             else:
-                st.warning("⚠️ No hay PDF adjunto en la base de datos.")
+                st.warning("⚠️ Sin OC Interna adjunta.")
 
         with c2:
             st.markdown("#### 📊 Matriz de Distribución")
             if pd.notna(ruta_excel) and str(ruta_excel).startswith("http"):
                 st.success("✅ Archivo de Excel ubicado exitosamente.")
-                st.markdown(f"**[📥 Haz clic aquí para descargar el Excel]({ruta_excel})**")
+                st.markdown(f"**[📥 Descargar Excel de Distribución]({ruta_excel})**")
             else:
-                if registro['Tipo_Doc'] == 'TR': st.info("ℹ️ Los traspasos (TR) no llevan hoja de distribución anexa.")
-                else: st.warning("⚠️ No hay archivo Excel adjunto.")
+                if registro['Tipo_Doc'] == 'TR': st.info("ℹ️ Los traspasos no llevan hoja de distribución.")
+                else: st.warning("⚠️ Sin archivo Excel adjunto.")
+                
+        st.markdown("---")
+        
+        # Fila 2: OC Proveedor y Factura Física
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown("#### 📄 OC Proveedor (Sin Precios)")
+            if pd.notna(ruta_pdf_sp) and str(ruta_pdf_sp).startswith("http"):
+                pdf_display_sp = f'<iframe src="{ruta_pdf_sp}" width="100%" height="300" type="application/pdf"></iframe>'
+                st.markdown(pdf_display_sp, unsafe_allow_html=True)
+                st.markdown(f"**[📥 Descargar OC Proveedor]({ruta_pdf_sp})**")
+            else:
+                if registro['Tipo_Doc'] == 'TR': st.info("ℹ️ No aplica para traspasos.")
+                else: st.warning("⚠️ Sin OC para Proveedor adjunta.")
+                
+        with c4:
+            st.markdown("#### 🧾 Factura / Remisión de Llegada")
+            if pd.notna(ruta_fac) and str(ruta_fac).startswith("http"):
+                if "pdf" in str(ruta_fac).lower():
+                    fac_display = f'<iframe src="{ruta_fac}" width="100%" height="300" type="application/pdf"></iframe>'
+                    st.markdown(fac_display, unsafe_allow_html=True)
+                else:
+                    st.image(str(ruta_fac), use_container_width=True)
+                st.markdown(f"**[📥 Descargar Factura / Remisión]({ruta_fac})**")
+            else:
+                if registro['Tipo_Doc'] == 'TR': st.info("ℹ️ No aplica para traspasos.")
+                else: st.warning("⚠️ Sin evidencia de recepción adjunta.")
 
 # ==========================================
 # ESTRUCTURA PRINCIPAL E INTERFAZ
@@ -347,11 +413,15 @@ if "mensaje_exito" in st.session_state:
     st.success(st.session_state.mensaje_exito)
     del st.session_state.mensaje_exito
 
-# Cargar BD de Supabase
+# Cargar BD de Supabase (Actualizada para incluir nuevas columnas)
 res_movimientos = supabase.table('movimientos').select('*').eq('"Activo"', 1).execute()
 df_movimientos = pd.DataFrame(res_movimientos.data)
 if df_movimientos.empty:
-    df_movimientos = pd.DataFrame(columns=["id", "Folio", "Proveedor", "Fecha", "Estatus", "Entrega", "Recepcion", "Obs", "Destino", "Factura", "Calidad", "Monto", "F_Pago", "Est_Pago", "Tipo_Doc", "Ruta_PDF", "Ruta_Excel", "Activo"])
+    df_movimientos = pd.DataFrame(columns=[
+        "id", "Folio", "Proveedor", "Fecha", "Estatus", "Entrega", "Recepcion", "Obs", "Destino", 
+        "Factura", "Calidad", "Monto", "F_Pago", "Est_Pago", "Tipo_Doc", "Ruta_PDF", "Ruta_Excel", 
+        "Ruta_PDF_SinPrecios", "Ruta_Factura", "Activo"
+    ])
 
 tabs_names = ["📊 Panel Principal", "📅 Calendario", "👤 Mi Perfil"]
 if st.session_state.is_admin: tabs_names.append("⚙️ Panel Súper-Admin")
@@ -378,17 +448,32 @@ with tab_panel:
 
     st.markdown("---")
     
-    k1, k2, k3 = st.columns(3)
-    pend_oc = len(df_movimientos[(df_movimientos['Tipo_Doc'] == 'OC') & (df_movimientos['Estatus'].isin(['Programado', 'Solicitado']))])
-    pend_tr = len(df_movimientos[(df_movimientos['Tipo_Doc'] == 'TR') & (df_movimientos['Estatus'].isin(['Programado', 'Solicitado']))])
+    # ---------------------------------------------------------
+    # MÉTRICAS Y LEYENDAS (Cálculo de últimos folios)
+    # ---------------------------------------------------------
+    df_oc = df_movimientos[df_movimientos['Tipo_Doc'] == 'OC']
+    df_tr = df_movimientos[df_movimientos['Tipo_Doc'] == 'TR']
     
+    pend_oc = len(df_oc[df_oc['Estatus'].isin(['Programado', 'Solicitado'])])
+    pend_tr = len(df_tr[df_tr['Estatus'].isin(['Programado', 'Solicitado'])])
+    
+    # Lógica del folio mayor (Alfanumérico)
+    ultimo_folio_oc = df_oc['Folio'].max() if not df_oc.empty else "Sin registros"
+    # Lógica del último ingresado (Por orden cronológico de ID en la BD)
+    ultimo_traspaso = df_tr.sort_values(by='id', ascending=False)['Folio'].iloc[0] if not df_tr.empty else "Sin registros"
+    
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("🕒 OC Pendientes", pend_oc)
-    k2.metric("🕒 Traspasos Pendientes", pend_tr)
-    if st.session_state.permiso_financiero and not df_movimientos.empty:
-        monto_p = df_movimientos[(df_movimientos['Tipo_Doc'] == 'OC') & (df_movimientos['Est_Pago'] == 'Pendiente')]['Monto'].sum()
-        k3.metric("💰 Monto Pendiente de Pago", f"${monto_p:,.2f}")
+    k2.metric("🔝 Último Folio OC", ultimo_folio_oc)
+    k3.metric("🕒 Traspasos Pendientes", pend_tr)
+    k4.metric("🔝 Último Traspaso", ultimo_traspaso)
     
     st.markdown("---")
+    
+    # BUSCADOR INTELIGENTE
+    col_busq, col_vacia = st.columns([1, 2])
+    with col_busq:
+        busqueda = st.text_input("🔍 Buscar por Folio o Proveedor...")
 
     hoy_str = datetime.date.today()
     def asignar_semaforo(row):
@@ -404,7 +489,15 @@ with tab_panel:
         df_movimientos[['Nivel_Urg', 'Alerta']] = df_movimientos.apply(asignar_semaforo, axis=1, result_type='expand')
         df_movimientos = df_movimientos.sort_values(by=['Nivel_Urg', 'Entrega'])
         
-        col_oculta = ["Activo", "id", "Nivel_Urg", "Ruta_PDF", "Ruta_Excel"]
+        # Filtro de Búsqueda
+        if busqueda:
+            termino = busqueda.lower()
+            df_movimientos = df_movimientos[
+                df_movimientos['Folio'].str.lower().str.contains(termino) | 
+                df_movimientos['Proveedor'].str.lower().str.contains(termino, na=False)
+            ]
+        
+        col_oculta = ["Activo", "id", "Nivel_Urg", "Ruta_PDF", "Ruta_Excel", "Ruta_PDF_SinPrecios", "Ruta_Factura"]
         if not st.session_state.permiso_financiero: col_oculta.extend(["Monto", "Factura", "F_Pago", "Est_Pago", "Proveedor"])
             
         cols_visibles = ['Alerta'] + [c for c in df_movimientos.columns if c not in col_oculta and c != 'Alerta']
@@ -413,7 +506,7 @@ with tab_panel:
         st.dataframe(df_visual, width='stretch', hide_index=True)
 
 # ------------------------------------------
-# PESTAÑA 2: CALENDARIO LOGÍSTICO (MODIFICACIÓN 2: PROVEEDOR)
+# PESTAÑA 2: CALENDARIO LOGÍSTICO
 # ------------------------------------------
 with tab_calendario:
     st.markdown("### 📅 Programación y Recepción de Mercancía")
