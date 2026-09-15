@@ -74,8 +74,16 @@ def verificar_credenciales(username, password):
         return user
     return None
 
+# Inicialización segura de variables en memoria
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
+
+if "sucursal" not in st.session_state:
+    st.session_state.sucursal = "CEDIS" # Valor por defecto si se salta el login
+if "username" not in st.session_state:
+    st.session_state.username = "Usuario"
+if "rol" not in st.session_state:
+    st.session_state.rol = "Sin Rol"
 
 if not st.session_state.autenticado:
     st.title("🔐 Grupo GINEZ - Control Logístico")
