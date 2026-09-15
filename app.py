@@ -576,36 +576,77 @@ with tab_planeacion:
 # ------------------------------------------
 # PESTAÑA 4: CARGA DE DATOS (ETL)
 # ------------------------------------------
+# ------------------------------------------
+# PESTAÑA 4: CARGA DE DATOS (ETL)
+# ------------------------------------------
 with tab_etl:
     if st.session_state.sucursal == 'CEDIS' or st.session_state.is_admin:
         st.subheader("⚙️ Procesamiento de Datos (ETL)")
+        
         c_etl1, c_etl2 = st.columns(2)
         with c_etl1:
-            st.markdown("#### 1. Inventarios Diarios")
+            st.markdown("#### 1. Catálogo Maestro y Diccionario")
+            st.file_uploader("Excel de Artículos y Reglas MDM", accept_multiple_files=True)
+            if st.button("Procesar Catálogo"): st.info("ETL en construcción...")
+            
+            st.markdown("#### 3. Inventarios Diarios")
             st.file_uploader("Existencias (Sucursales y CEDIS)", accept_multiple_files=True)
             if st.button("Procesar Inventarios"): st.info("ETL en construcción...")
+            
         with c_etl2:
-            st.markdown("#### 2. Ventas Históricas")
+            st.markdown("#### 2. Paquetes / BOM")
+            st.file_uploader("Catálogo de Paquetes", accept_multiple_files=True)
+            if st.button("Procesar Paquetes"): st.info("ETL en construcción...")
+            
+            st.markdown("#### 4. Ventas Históricas")
             st.file_uploader("Tickets Semanales", accept_multiple_files=True)
             if st.button("Procesar Ventas"): st.info("ETL en construcción...")
-    else: st.warning("No tienes permisos para inyectar bases de datos globales.")
-
+    else: 
+        st.warning("No tienes permisos para inyectar bases de datos globales.")
 # ------------------------------------------
 # PESTAÑAS 5 y 6: PERFIL Y ADMIN
 # ------------------------------------------
-with tab_perfil:
-    st.subheader("Mi Perfil")
-    with st.form("form_perfil"):
-        nuevo_user = st.text_input("Cambiar Usuario", value=st.session_state.username)
-        nueva_pass = st.text_input("Nueva Contraseña", type="password")
-        if st.form_submit_button("Guardar Cambios", type="primary"):
-            datos_update = {"username": nuevo_user}
-            if nueva_pass.strip() != "": datos_update["password"] = hash_password(nueva_pass)
-            supabase.table('usuarios').update(datos_update).eq('id', st.session_state.user_id).execute()
-            st.success("✅ Credenciales actualizadas.")
-
+# ------------------------------------------
+# PESTAÑAS 6: ADMIN (EDICIÓN DE USUARIOS)
+# ------------------------------------------
 if st.session_state.is_admin:
     with tab_admin:
         st.subheader("Panel de Súper Administrador")
-        res_usr = supabase.table('usuarios').select('username, rol, sucursal_asignada, correo').execute()
-        st.dataframe(pd.DataFrame(res_usr.data), hide_index=True)
+        
+        # Descargamos los usuarios
+        res_usr = supabase.table('usuarios').select('id, username, rol, sucursal_asignada, correo').execute()
+        df_usr = pd.DataFrame(res_usr.data)
+        
+        c_admin1, c_admin2 = st.columns([2, 1])
+        with c_admin1:
+            st.markdown("#### Lista de Usuarios")
+            st.dataframe(df_usr[['username', 'rol', 'sucursal_asignada', 'correo']], hide_index=True, use_container_width=True)
+        
+        with c_admin2:
+            st.markdown("#### Asignar Rol y Sucursal")
+            if not df_usr.empty:
+                # Selector de usuario
+                usr_sel = st.selectbox("Selecciona un usuario a editar:", df_usr['username'].tolist())
+                usr_data = df_usr[df_usr['username'] == usr_sel].iloc[0]
+                
+                with st.form("form_editar_usuario"):
+                    # Opciones de sistema
+                    lista_roles = ["Admin Master", "Jefe de Área", "Gerente de Sucursal", "Operador"]
+                    lista_sucs = ["CEDIS", "Actopan", "Mixquiahuala", "Pachuca", "Querétaro", "Oaxaca", "Veracruz"]
+                    
+                    # Encontrar el índice actual para que aparezca por defecto
+                    idx_rol = lista_roles.index(usr_data['rol']) if usr_data['rol'] in lista_roles else 1
+                    idx_suc = lista_sucs.index(usr_data['sucursal_asignada']) if usr_data['sucursal_asignada'] in lista_sucs else 0
+                    
+                    n_rol = st.selectbox("Nivel de Acceso", lista_roles, index=idx_rol)
+                    n_suc = st.selectbox("Sucursal Asignada (Gafete)", lista_sucs, index=idx_suc)
+                    
+                    if st.form_submit_button("💾 Guardar Cambios", type="primary"):
+                        # Actualizar en Supabase
+                        supabase.table('usuarios').update({
+                            "rol": n_rol,
+                            "sucursal_asignada": n_suc
+                        }).eq("id", str(usr_data['id'])).execute()
+                        
+                        st.success(f"✅ Los permisos de '{usr_sel}' han sido actualizados.")
+                        st.rerun()
