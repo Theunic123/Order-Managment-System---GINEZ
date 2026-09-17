@@ -693,7 +693,6 @@ with tab_etl:
                     st.warning("⚠️ Sube al menos un archivo de ventas.")
     else: 
         st.warning("No tienes permisos para inyectar bases de datos globales.")
-        
 # ------------------------------------------
 # PESTAÑA 5: REGLAS MDM (Diccionario y PKG)
 # ------------------------------------------
