@@ -18,32 +18,27 @@ def cargar_a_supabase(supabase, tabla, df, batch_size=1000):
         print(f"Error al subir a Supabase: {e}")
         return False
 
-def limpiar_catalogo_mdm(archivo_catalogo, archivo_mdm):
-    """Fase 1: Extrae Catálogo y adhiere el Case Pack (PKG)."""
+def limpiar_catalogo_mdm(archivo_catalogo):
+    """Fase 1: Extrae Catálogo de SICAR puro (Sin Excel externo)."""
     try:
+        # Forzar lectura de la primera hoja
         df_cat = pd.read_excel(archivo_catalogo, sheet_name=0)
         df_cat.columns = df_cat.columns.astype(str).str.strip().str.lower().str.replace(' ', '_')
         
         if 'clave' in df_cat.columns: df_cat = df_cat.rename(columns={'clave': 'sku'})
-        df_cat = df_cat.dropna(subset=['sku']).drop_duplicates(subset=['sku'])
-        if 'descripcion' in df_cat.columns: df_cat['descripcion'] = df_cat['descripcion'].astype(str).str.strip().str.upper()
         
-        # Integración de Empaques (MDM)
-        if archivo_mdm is not None:
-            try:
-                df_empaques = pd.read_excel(archivo_mdm, sheet_name='Empaques')
-                df_empaques.columns = df_empaques.columns.astype(str).str.strip().str.lower()
-                if 'sku' in df_empaques.columns and 'caja_master' in df_empaques.columns:
-                    df_cat = pd.merge(df_cat, df_empaques[['sku', 'caja_master']], on='sku', how='left')
-                    df_cat['pkg'] = df_cat['caja_master'].fillna(1).astype(int)
-                else: df_cat['pkg'] = 1
-            except Exception: df_cat['pkg'] = 1
-        else: df_cat['pkg'] = 1
-
-        # Asegurar columnas mínimas para la BD
-        for col in ['departamento', 'categoria']:
-            if col not in df_cat.columns: df_cat[col] = "SIN CLASIFICAR"
+        # Limpieza básica
+        df_cat = df_cat.dropna(subset=['sku']).drop_duplicates(subset=['sku'])
+        if 'descripcion' in df_cat.columns: 
+            df_cat['descripcion'] = df_cat['descripcion'].astype(str).str.strip().str.upper()
+        
+        # Columnas por defecto para BD
+        if 'departamento' not in df_cat.columns: df_cat['departamento'] = "SIN CLASIFICAR"
+        if 'categoria' not in df_cat.columns: df_cat['categoria'] = "SIN CLASIFICAR"
         if 'precio_compra' not in df_cat.columns: df_cat['precio_compra'] = 0.0
+        
+        # PKG por defecto 1, se edita visualmente en la plataforma
+        df_cat['pkg'] = 1 
 
         columnas_finales = ['sku', 'descripcion', 'departamento', 'categoria', 'pkg', 'precio_compra']
         return df_cat[[c for c in columnas_finales if c in df_cat.columns]]
