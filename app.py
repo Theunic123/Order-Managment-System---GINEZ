@@ -164,7 +164,6 @@ def modal_crear_proveedor():
         else:
             logo_url = None
             if logo_prov:
-                # Subir logo al bucket
                 path = f"logos/{nombre_prov.strip().upper().replace(' ', '_')}_{logo_prov.name}"
                 supabase.storage.from_("documentos").upload(path, logo_prov.getvalue(), file_options={"content-type": f"image/{logo_prov.name.split('.')[-1]}"})
                 logo_url = supabase.storage.from_("documentos").get_public_url(path)
@@ -424,7 +423,7 @@ if "mensaje_exito" in st.session_state:
     del st.session_state.mensaje_exito
 
 # PESTAÑAS
-tabs_names = ["📊 Operaciones (Folios)", "📅 Calendario", "🧠 Planeación (Pull)", "⚙️ Carga Datos (ETL)", "👤 Mi Perfil"]
+tabs_names = ["📊 Operaciones (Folios)", "📅 Calendario", "🧠 Planeación (Pull)", "⚙️ Carga Datos (ETL)", "🪢 Reglas MDM", "👤 Mi Perfil"]
 if st.session_state.is_admin: tabs_names.append("🛡️ Panel Súper-Admin")
 
 tabs = st.tabs(tabs_names)
@@ -432,8 +431,9 @@ tab_operaciones = tabs[0]
 tab_calendario = tabs[1]
 tab_planeacion = tabs[2]
 tab_etl = tabs[3]
-tab_perfil = tabs[4]
-if st.session_state.is_admin: tab_admin = tabs[5]
+tab_mdm = tabs[4]
+tab_perfil = tabs[5]
+if st.session_state.is_admin: tab_admin = tabs[6]
 
 # Cargar BD Operaciones
 res_movimientos = supabase.table('movimientos').select('*').eq('"Activo"', 1).execute()
@@ -542,7 +542,6 @@ with tab_planeacion:
             if st.button("➕ Crear Proveedor", use_container_width=True):
                 modal_crear_proveedor()
 
-    # Cargar proveedores dinámicos desde BD
     res_provs = supabase.table('proveedores').select('nombre').order('nombre').execute()
     lista_proveedores = [p['nombre'] for p in res_provs.data] if res_provs.data else ["SIN PROVEEDORES"]
 
@@ -585,14 +584,13 @@ with tab_etl:
         c_etl1, c_etl2 = st.columns(2)
         
         with c_etl1:
-            st.markdown("#### 1. Catálogo Maestro y MDM")
+            st.markdown("#### 1. Catálogo Maestro SICAR")
             cat_file = st.file_uploader("Catálogo de SICAR (.xls)", type=["xls", "xlsx"])
-            mdm_file = st.file_uploader("Reglas MDM (.xlsx) [Opcional]", type=["xlsx"])
             
             if st.button("Procesar Catálogo", type="primary"):
                 if cat_file:
-                    with st.spinner("Limpiando catálogo y aplicando reglas MDM..."):
-                        df_cat = etl_engine.limpiar_catalogo_mdm(cat_file, mdm_file)
+                    with st.spinner("Limpiando catálogo..."):
+                        df_cat = etl_engine.limpiar_catalogo_mdm(cat_file)
                         if not df_cat.empty:
                             exito = etl_engine.cargar_a_supabase(supabase, 'catalogo_maestro', df_cat)
                             if exito: st.success(f"✅ Catálogo actualizado: {len(df_cat)} artículos.")
@@ -624,7 +622,6 @@ with tab_etl:
                     with st.spinner("Extrayendo relaciones de componentes..."):
                         df_pkg = etl_engine.limpiar_paquetes_bom(pkg_files)
                         if not df_pkg.empty:
-                            # Truncamos la tabla antes de cargar la nueva estructura BOM
                             supabase.table('bom_paquetes').delete().neq("id", 0).execute() 
                             exito = etl_engine.cargar_a_supabase(supabase, 'bom_paquetes', df_pkg)
                             if exito: st.success(f"✅ BOM actualizado: {len(df_pkg)} dependencias extraídas.")
@@ -647,17 +644,117 @@ with tab_etl:
                     st.warning("⚠️ Sube al menos un archivo de ventas.")
     else: 
         st.warning("No tienes permisos para inyectar bases de datos globales.")
+
 # ------------------------------------------
-# PESTAÑAS 5 y 6: PERFIL Y ADMIN
+# PESTAÑA 5: REGLAS MDM (Diccionario y PKG)
 # ------------------------------------------
+with tab_mdm:
+    if st.session_state.permiso_edicion:
+        st.subheader("🪢 Gestión de Datos Maestros (MDM)")
+        st.markdown("Corrige registros huérfanos y asigna reglas de empaque (PKG) sin usar Excel.")
+        
+        mdm_tab1, mdm_tab2 = st.tabs(["🚨 Corrección de Huérfanos", "📦 Asignación de PKG y Departamentos"])
+        
+        with mdm_tab1:
+            st.info("El sistema detecta artículos vendidos que no existen en tu catálogo maestro.")
+            v_res = supabase.table('ventas_historicas').select('sku, desc_sicar').execute()
+            c_res = supabase.table('catalogo_maestro').select('sku').execute()
+            d_res = supabase.table('diccionario_mdm').select('sku_viejo').execute()
+            
+            if v_res.data:
+                df_v = pd.DataFrame(v_res.data).drop_duplicates(subset=['sku'])
+                df_c = pd.DataFrame(c_res.data) if c_res.data else pd.DataFrame(columns=['sku'])
+                df_d = pd.DataFrame(d_res.data) if d_res.data else pd.DataFrame(columns=['sku_viejo'])
+                
+                if not df_c.empty: df_v = df_v[~df_v['sku'].isin(df_c['sku'])]
+                if not df_d.empty: df_v = df_v[~df_v['sku'].isin(df_d['sku_viejo'])]
+                
+                if not df_v.empty:
+                    df_v['SKU_CORRECTO'] = ""
+                    st.warning(f"Se detectaron {len(df_v)} códigos transaccionales huérfanos.")
+                    
+                    edit_huerfanos = st.data_editor(
+                        df_v[['sku', 'desc_sicar', 'SKU_CORRECTO']].rename(columns={'sku': 'SKU_SICAR', 'desc_sicar': 'DESCRIPCIÓN VENDIDA'}),
+                        hide_index=True, use_container_width=True
+                    )
+                    
+                    if st.button("💾 Guardar Correcciones"):
+                        corregidos = edit_huerfanos[edit_huerfanos['SKU_CORRECTO'].astype(str).str.strip() != ""]
+                        if not corregidos.empty:
+                            datos_insert = [{"sku_viejo": row['SKU_SICAR'], "sku_nuevo": row['SKU_CORRECTO']} for _, row in corregidos.iterrows()]
+                            supabase.table('diccionario_mdm').upsert(datos_insert).execute()
+                            st.success(f"✅ {len(corregidos)} registros agregados al diccionario MDM. Ya no serán huérfanos.")
+                            st.rerun()
+                else:
+                    st.success("✅ Excelente. No hay registros huérfanos en tu historial de ventas.")
+            else:
+                st.write("Sube tu historial de ventas primero en la pestaña ETL.")
+
+        with mdm_tab2:
+            st.info("Busca, filtra y edita el Case Pack (PKG) o Departamento de tus artículos.")
+            cat_res = supabase.table('catalogo_maestro').select('*').execute()
+            
+            if cat_res.data:
+                df_catalogo = pd.DataFrame(cat_res.data)
+                
+                busq_cat = st.text_input("🔍 Buscar por SKU o Descripción:")
+                if busq_cat:
+                    termino = busq_cat.lower()
+                    df_catalogo = df_catalogo[df_catalogo['sku'].str.lower().str.contains(termino) | df_catalogo['descripcion'].str.lower().str.contains(termino)]
+                
+                col_config = {
+                    "pkg": st.column_config.NumberColumn("📦 PKG (Caja Master)", min_value=1, required=True),
+                    "departamento": st.column_config.TextColumn("🏢 Departamento")
+                }
+                
+                edit_cat = st.data_editor(
+                    df_catalogo[['sku', 'descripcion', 'departamento', 'pkg']],
+                    column_config=col_config,
+                    disabled=["sku", "descripcion"],
+                    hide_index=True, use_container_width=True
+                )
+                
+                if st.button("💾 Actualizar Catálogo"):
+                    cambios = []
+                    for i in range(len(edit_cat)):
+                        if (edit_cat.loc[i, 'pkg'] != df_catalogo.loc[i, 'pkg']) or (edit_cat.loc[i, 'departamento'] != df_catalogo.loc[i, 'departamento']):
+                            cambios.append({
+                                "sku": edit_cat.loc[i, 'sku'],
+                                "departamento": edit_cat.loc[i, 'departamento'],
+                                "pkg": int(edit_cat.loc[i, 'pkg'])
+                            })
+                    if cambios:
+                        supabase.table('catalogo_maestro').upsert(cambios).execute()
+                        st.success(f"✅ {len(cambios)} artículos actualizados exitosamente.")
+                        st.rerun()
+                    else:
+                        st.info("No se detectaron cambios.")
+            else:
+                st.write("Sube el catálogo de SICAR en la pestaña ETL para empezar.")
+    else:
+        st.warning("No tienes permisos para editar los datos maestros.")
+
 # ------------------------------------------
-# PESTAÑAS 6: ADMIN (EDICIÓN DE USUARIOS)
+# PESTAÑA 6: PERFIL
+# ------------------------------------------
+with tab_perfil:
+    st.subheader("Mi Perfil")
+    with st.form("form_perfil"):
+        nuevo_user = st.text_input("Cambiar Usuario", value=st.session_state.username)
+        nueva_pass = st.text_input("Nueva Contraseña", type="password")
+        if st.form_submit_button("Guardar Cambios", type="primary"):
+            datos_update = {"username": nuevo_user}
+            if nueva_pass.strip() != "": datos_update["password"] = hash_password(nueva_pass)
+            supabase.table('usuarios').update(datos_update).eq('id', st.session_state.user_id).execute()
+            st.success("✅ Credenciales actualizadas.")
+
+# ------------------------------------------
+# PESTAÑA 7: ADMIN (EDICIÓN DE USUARIOS)
 # ------------------------------------------
 if st.session_state.is_admin:
     with tab_admin:
         st.subheader("Panel de Súper Administrador")
         
-        # Descargamos los usuarios
         res_usr = supabase.table('usuarios').select('id, username, rol, sucursal_asignada, correo').execute()
         df_usr = pd.DataFrame(res_usr.data)
         
@@ -669,16 +766,13 @@ if st.session_state.is_admin:
         with c_admin2:
             st.markdown("#### Asignar Rol y Sucursal")
             if not df_usr.empty:
-                # Selector de usuario
                 usr_sel = st.selectbox("Selecciona un usuario a editar:", df_usr['username'].tolist())
                 usr_data = df_usr[df_usr['username'] == usr_sel].iloc[0]
                 
                 with st.form("form_editar_usuario"):
-                    # Opciones de sistema
                     lista_roles = ["Admin Master", "Jefe de Área", "Gerente de Sucursal", "Operador"]
                     lista_sucs = ["CEDIS", "Actopan", "Mixquiahuala", "Pachuca", "Querétaro", "Oaxaca", "Veracruz"]
                     
-                    # Encontrar el índice actual para que aparezca por defecto
                     idx_rol = lista_roles.index(usr_data['rol']) if usr_data['rol'] in lista_roles else 1
                     idx_suc = lista_sucs.index(usr_data['sucursal_asignada']) if usr_data['sucursal_asignada'] in lista_sucs else 0
                     
@@ -686,7 +780,6 @@ if st.session_state.is_admin:
                     n_suc = st.selectbox("Sucursal Asignada (Gafete)", lista_sucs, index=idx_suc)
                     
                     if st.form_submit_button("💾 Guardar Cambios", type="primary"):
-                        # Actualizar en Supabase
                         supabase.table('usuarios').update({
                             "rol": n_rol,
                             "sucursal_asignada": n_suc
