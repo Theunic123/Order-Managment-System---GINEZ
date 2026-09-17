@@ -589,9 +589,38 @@ with tab_planeacion:
         if st.button("💾 Enviar Pedido a CEDIS", type="primary"):
             pedido_final = df_editado[df_editado['CANTIDAD A PEDIR'] > 0]
             if not pedido_final.empty:
-                st.success(f"✅ ¡Pedido enviado a CEDIS! ({len(pedido_final)} SKUs calculados con FVA).")
-                st.session_state.mostrar_grid = False
-            else: st.warning("⚠️ No capturaste ninguna cantidad mayor a cero.")
+                with st.spinner("Guardando orden en base de datos segura..."):
+                    # 1. Crear el folio del pedido en Supabase
+                    fecha_hoy = datetime.date.today().strftime("%Y-%m-%d")
+                    res_ped = supabase.table('pedidos_pull').insert({
+                        "sucursal": st.session_state.sucursal,
+                        "proveedor": st.session_state.prov_actual,
+                        "fecha_solicitud": fecha_hoy,
+                        "estatus": "En Revisión CEDIS"
+                    }).execute()
+                    
+                    pedido_id = res_ped.data[0]['id']
+                    
+                    # 2. Guardar todos los artículos que pidió el gerente
+                    detalles = []
+                    for _, row in pedido_final.iterrows():
+                        detalles.append({
+                            "pedido_id": pedido_id,
+                            "sku": row['SKU'],
+                            "descripcion": row['Descripción'],
+                            "cantidad_pedida": row['CANTIDAD A PEDIR'],
+                            "sugerencia_sistema": row['Sugerencia Sistema'],
+                            "target_level": row['Máximo / Target']
+                        })
+                    
+                    supabase.table('pedidos_pull_detalle').insert(detalles).execute()
+                    
+                    # 3. Limpiar pantalla y confirmar
+                    st.success(f"✅ ¡Pedido enviado a CEDIS exitosamente! (Folio Interno: #{pedido_id})")
+                    st.session_state.mostrar_grid = False
+                    st.rerun()
+            else: 
+                st.warning("⚠️ No capturaste ninguna cantidad mayor a cero.")
 # ------------------------------------------
 # PESTAÑA 5: REGLAS MDM (Diccionario y PKG)
 # ------------------------------------------
