@@ -373,24 +373,6 @@ def modal_ver_documento(df_mov):
                 st.markdown(f"**[📥 Descargar Factura]({ruta_fac})**")
             else: st.warning("⚠️ Sin evidencia adjunta.")
 
-# ==========================================
-# SIMULADOR DEL MOTOR MRP (UI TEST)
-# ==========================================
-def simular_motor_mrp(proveedor, l_prov, r_prov, sucursal):
-    np.random.seed(42)
-    datos = []
-    for i in range(1, 21):
-        sug = np.random.randint(0, 100)
-        datos.append({
-            "SKU": f"TRU-{1000+i}", "Descripción": f"Producto {proveedor} {i}",
-            "Ventas (Últimos días)": np.random.randint(10, 150), "Stock Actual": np.random.randint(0, 50),
-            "Mínimo / SS": np.random.randint(5, 20), "Máximo / Target": np.random.randint(50, 120),
-            "Sugerencia Sistema": sug, "Desviación (σ)": round(np.random.uniform(1.5, 5.5), 2),
-            "CV": round(np.random.uniform(0.1, 3.5), 2)
-        })
-    df = pd.DataFrame(datos)
-    return df.sort_values(by="Sugerencia Sistema", ascending=False).reset_index(drop=True)
-
 @st.dialog("⚡ Carga Rápida de Sugerencias")
 def popup_cargar_sugerencia():
     st.markdown("### El algoritmo ha terminado.")
@@ -555,7 +537,6 @@ with tab_planeacion:
 
     if calcular:
         with st.spinner("Analizando volatilidad y ejecutando torneo FVA (Syntetos-Boylan / XGBoost)..."):
-            # 1. Descargamos la data cruda desde Supabase
             res_v = supabase.table('ventas_historicas').select('sku, desc_sicar, sucursal, fecha, cantidad').execute()
             res_i = supabase.table('inventario_historico').select('id, sku, sucursal, existencias').execute()
             res_c = supabase.table('catalogo_maestro').select('sku, departamento, pkg').execute()
@@ -565,7 +546,6 @@ with tab_planeacion:
             df_cat = pd.DataFrame(res_c.data) if res_c.data else pd.DataFrame()
             
             if not df_ventas.empty and not df_inv.empty and not df_cat.empty:
-                # 2. Le pasamos toda la data al nuevo cerebro matemático
                 df_resultado = mrp_engine.generar_sugerencia_pull(prov_input, l_prov, r_prov, st.session_state.sucursal, df_ventas, df_inv, df_cat)
                 
                 if not df_resultado.empty:
@@ -573,14 +553,12 @@ with tab_planeacion:
                     st.session_state.df_pedido_actual = df_resultado
                     st.session_state.prov_actual = prov_input
                     st.session_state.mostrar_grid = False
-                    # 3. Disparamos el Pop-Up emergente
                     popup_cargar_sugerencia()
                 else:
                     st.warning("⚠️ No se encontró suficiente historial de ventas para este proveedor en esta sucursal.")
             else:
                 st.error("❌ Faltan datos en la base. Sube tus ventas, inventarios y catálogo en la pestaña ETL.")
 
-    # El GRID Interactivo (No cambia)
     if st.session_state.get("mostrar_grid", False):
         st.markdown(f"### 📋 Hoja de Pedido: {st.session_state.prov_actual}")
         column_config = {"CANTIDAD A PEDIR": st.column_config.NumberColumn("✍️ CANTIDAD A PEDIR", help="Haz doble clic para editar", min_value=0, step=1, required=True)}
@@ -590,7 +568,6 @@ with tab_planeacion:
             pedido_final = df_editado[df_editado['CANTIDAD A PEDIR'] > 0]
             if not pedido_final.empty:
                 with st.spinner("Guardando orden en base de datos segura..."):
-                    # 1. Crear el folio del pedido en Supabase
                     fecha_hoy = datetime.date.today().strftime("%Y-%m-%d")
                     res_ped = supabase.table('pedidos_pull').insert({
                         "sucursal": st.session_state.sucursal,
@@ -601,7 +578,6 @@ with tab_planeacion:
                     
                     pedido_id = res_ped.data[0]['id']
                     
-                    # 2. Guardar todos los artículos que pidió el gerente
                     detalles = []
                     for _, row in pedido_final.iterrows():
                         detalles.append({
@@ -615,7 +591,6 @@ with tab_planeacion:
                     
                     supabase.table('pedidos_pull_detalle').insert(detalles).execute()
                     
-                    # 3. Limpiar pantalla y confirmar
                     st.success(f"✅ ¡Pedido enviado a CEDIS exitosamente! (Folio Interno: #{pedido_id})")
                     st.session_state.mostrar_grid = False
                     st.rerun()
@@ -693,6 +668,7 @@ with tab_etl:
                     st.warning("⚠️ Sube al menos un archivo de ventas.")
     else: 
         st.warning("No tienes permisos para inyectar bases de datos globales.")
+
 # ------------------------------------------
 # PESTAÑA 5: REGLAS MDM (Diccionario y PKG)
 # ------------------------------------------
