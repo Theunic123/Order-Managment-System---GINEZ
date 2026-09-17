@@ -590,7 +590,9 @@ with tab_etl:
             if st.button("Procesar Catálogo", type="primary"):
                 if cat_file:
                     with st.spinner("Limpiando catálogo..."):
+                        # CORRECCIÓN: Ahora solo mandamos 1 archivo, sin el MDM
                         df_cat = etl_engine.limpiar_catalogo_mdm(cat_file)
+                        
                         if not df_cat.empty:
                             exito = etl_engine.cargar_a_supabase(supabase, 'catalogo_maestro', df_cat)
                             if exito: st.success(f"✅ Catálogo actualizado: {len(df_cat)} artículos.")
@@ -644,7 +646,6 @@ with tab_etl:
                     st.warning("⚠️ Sube al menos un archivo de ventas.")
     else: 
         st.warning("No tienes permisos para inyectar bases de datos globales.")
-
 # ------------------------------------------
 # PESTAÑA 5: REGLAS MDM (Diccionario y PKG)
 # ------------------------------------------
