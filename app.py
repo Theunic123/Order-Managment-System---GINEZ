@@ -415,17 +415,18 @@ if "mensaje_exito" in st.session_state:
     del st.session_state.mensaje_exito
 
 # PESTAÑAS
-tabs_names = ["📊 Operaciones (Folios)", "📅 Calendario", "🧠 Planeación (Pull)", "⚙️ Carga Datos (ETL)", "🪢 Reglas MDM", "👤 Mi Perfil"]
+tabs_names = ["📊 Operaciones (Folios)", "📅 Calendario", "🧠 Planeación (Pull)", "🏢 Torre CEDIS", "⚙️ Carga Datos (ETL)", "🪢 Reglas MDM", "👤 Mi Perfil"]
 if st.session_state.is_admin: tabs_names.append("🛡️ Panel Súper-Admin")
 
 tabs = st.tabs(tabs_names)
 tab_operaciones = tabs[0]
 tab_calendario = tabs[1]
 tab_planeacion = tabs[2]
-tab_etl = tabs[3]
-tab_mdm = tabs[4]
-tab_perfil = tabs[5]
-if st.session_state.is_admin: tab_admin = tabs[6]
+tab_torre = tabs[3] # <--- NUEVA PESTAÑA
+tab_etl = tabs[4]
+tab_mdm = tabs[5]
+tab_perfil = tabs[6]
+if st.session_state.is_admin: tab_admin = tabs[7]
 
 # Cargar BD Operaciones
 res_movimientos = supabase.table('movimientos').select('*').eq('"Activo"', 1).execute()
@@ -619,6 +620,61 @@ with tab_planeacion:
                     st.rerun()
             else: 
                 st.warning("⚠️ No capturaste ninguna cantidad mayor a cero.")
+
+# ------------------------------------------
+# PESTAÑA 4: TORRE DE CONTROL CEDIS (CONSOLIDACIÓN)
+# ------------------------------------------
+with tab_torre:
+    if st.session_state.sucursal == 'CEDIS' or st.session_state.is_admin:
+        st.subheader("🏢 Torre de Control - Consolidación de Pedidos")
+        st.markdown("Visualiza las solicitudes de las sucursales, aprueba entregas directas (DSD) y consolida compras para CEDIS.")
+        
+        # Consultar todos los pedidos pendientes en la red
+        res_pendientes = supabase.table('pedidos_pull').select('*').eq('estatus', 'En Revisión CEDIS').execute()
+        
+        if res_pendientes.data:
+            df_pend = pd.DataFrame(res_pendientes.data)
+            
+            # Separar inteligentemente DSD vs CEDIS
+            df_dsd = df_pend[df_pend['tipo_entrega'] == 'DIRECTA']
+            df_cedis = df_pend[df_pend['tipo_entrega'] == 'CEDIS']
+            
+            c_torre1, c_torre2 = st.columns(2)
+            
+            with c_torre1:
+                st.markdown("#### 📦 Para Consolidar en CEDIS")
+                if not df_cedis.empty:
+                    # Mostrar tabla bonita
+                    st.dataframe(df_cedis[['id', 'proveedor', 'sucursal', 'fecha_solicitud']].rename(columns={'id': 'Folio'}), hide_index=True, use_container_width=True)
+                    
+                    st.markdown("---")
+                    prov_consolidar = st.selectbox("Selecciona Proveedor a Consolidar:", df_cedis['proveedor'].unique())
+                    
+                    if st.button("🔄 Ejecutar MEIO Global y Generar Excel", type="primary"):
+                        st.info("⏳ Próximo Paso: Aquí conectaremos tu función de Asignación Cross-Docking (Fair-Share) y descargará el Excel final.")
+                else:
+                    st.info("No hay pedidos pendientes para surtir a través de CEDIS.")
+                    
+            with c_torre2:
+                st.markdown("#### 🚚 Entregas Directas (DSD)")
+                if not df_dsd.empty:
+                    st.dataframe(df_dsd[['id', 'proveedor', 'sucursal', 'fecha_solicitud']].rename(columns={'id': 'Folio'}), hide_index=True, use_container_width=True)
+                    
+                    st.markdown("---")
+                    pedido_dsd = st.selectbox("Aprobar Pedido Directo (Folio):", df_dsd['id'].unique())
+                    
+                    if st.button("✅ Aprobar OC Directa", type="primary"):
+                        # Se aprueba y desaparece de la bandeja
+                        supabase.table('pedidos_pull').update({"estatus": "Aprobado DSD"}).eq("id", pedido_dsd).execute()
+                        st.success(f"✅ Pedido #{pedido_dsd} aprobado exitosamente. Listo para generar folio en Operaciones.")
+                        st.rerun()
+                else:
+                    st.info("No hay pedidos con entrega directa pendientes.")
+        else:
+            st.success("✅ Bandeja limpia. No hay solicitudes pendientes en la red de sucursales.")
+    else:
+        st.warning("🔒 Acceso denegado. Esta vista es exclusiva para Planeación en CEDIS.")
+        
 # ------------------------------------------
 # PESTAÑA 4: CARGA DE DATOS (ETL)
 # ------------------------------------------
