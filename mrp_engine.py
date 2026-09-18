@@ -3,35 +3,28 @@ import numpy as np
 import re
 import math
 import streamlit as st # Inyectamos Streamlit para mostrar errores reales
+import json
 
 def cargar_a_supabase(supabase, tabla, df, batch_size=500):
-    """Convierte el DataFrame y lo sube a Supabase blindado contra errores de BD."""
+    """Convierte el DataFrame a JSON estricto para evitar choques de compatibilidad con httpx/PostgREST."""
     if df.empty: return False
     
-    # Diccionario puro para evitar que JSON o Supabase rechacen el paquete
-    datos = []
-    for record in df.to_dict('records'):
-        clean_record = {}
-        for k, v in record.items():
-            if pd.isna(v) or v != v:
-                clean_record[k] = None
-            elif isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
-                clean_record[k] = None
-            else:
-                clean_record[k] = v
-        datos.append(clean_record)
-    
     try:
+        # EL TRUCO MAGISTRAL: Pandas convierte todo a texto JSON perfecto y neutro. 
+        # Automáticamente vuelve los NaNs, NaTs e Infinitos en "null" aceptados por bases de datos.
+        json_str = df.to_json(orient='records', date_format='iso')
+        datos_puros = json.loads(json_str)
+        
         # Subimos la información en bloques
-        for i in range(0, len(datos), batch_size):
-            bloque = datos[i:i+batch_size]
+        for i in range(0, len(datos_puros), batch_size):
+            bloque = datos_puros[i:i+batch_size]
             supabase.table(tabla).upsert(bloque).execute()
         return True
     except Exception as e:
-        # Mostramos el error técnico exacto en la pantalla de la web
-        st.error(f"🚨 Falla en la Base de Datos ({tabla}). Detalle técnico: {str(e)}")
+        import streamlit as st
+        st.error(f"🚨 Falla en la Base de Datos ({tabla}). Detalle: {str(e)}")
         return False
-
+    
 def limpiar_catalogo_mdm(archivo_catalogo):
     """Fase 1: Extrae Catálogo de SICAR puro."""
     try:
