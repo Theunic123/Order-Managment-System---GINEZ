@@ -316,10 +316,19 @@ def modal_editar_registro(df_mov):
                     "Estatus": nuevo_estatus, "Entrega": nueva_entrega.strftime("%Y-%m-%d") if nueva_entrega else None,
                     "Recepcion": nueva_recepcion.strftime("%Y-%m-%d") if nueva_recepcion else None,
                     "Obs": nueva_obs, "Destino": nuevo_destino, "Factura": nueva_factura,
-                    "Calidad": nueva_calidad, "Monto": nuevo_monto, "F_Pago": nuevo_fpago,
-                    "Est_Pago": nuevo_estpago, "Ruta_PDF": ruta_pdf_bd, "Ruta_Excel": ruta_excel_bd,
-                    "Ruta_PDF_SinPrecios": ruta_pdf_sp_bd, "Ruta_Factura": ruta_fac_bd
+                    "Calidad": nueva_calidad, "Monto": float(nuevo_monto) if pd.notna(nuevo_monto) else 0.0, 
+                    "F_Pago": nuevo_fpago,
+                    "Est_Pago": nuevo_estpago, 
+                    "Ruta_PDF": ruta_pdf_bd if pd.notna(ruta_pdf_bd) else None, 
+                    "Ruta_Excel": ruta_excel_bd if pd.notna(ruta_excel_bd) else None,
+                    "Ruta_PDF_SinPrecios": ruta_pdf_sp_bd if pd.notna(ruta_pdf_sp_bd) else None, 
+                    "Ruta_Factura": ruta_fac_bd if pd.notna(ruta_fac_bd) else None
                 }
+                
+                # Limpieza Anti-NaN extra de seguridad
+                for key, val in data_update.items():
+                    if pd.isna(val): data_update[key] = None
+
                 supabase.table('movimientos').update(data_update).eq('"Folio"', folio_editar).execute()
                 registrar_bitacora(st.session_state.username, "ACTUALIZACIÓN", f"Editó folio {folio_editar}.")
                 st.session_state.mensaje_exito = f"🔄 Movimiento {folio_editar} actualizado."
