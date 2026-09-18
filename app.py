@@ -573,20 +573,32 @@ with tab_planeacion:
         column_config = {"CANTIDAD A PEDIR": st.column_config.NumberColumn("✍️ CANTIDAD A PEDIR", help="Haz doble clic para editar", min_value=0, step=1, required=True)}
         df_editado = st.data_editor(st.session_state.df_pedido_actual, column_config=column_config, disabled=["SKU", "Descripción", "Ventas (Media/Mes)", "Stock Actual", "Mínimo / SS", "Máximo / Target", "Sugerencia Sistema", "Desviación (σ)", "CV"], hide_index=True, use_container_width=True, height=500)
         
-        if st.button("💾 Enviar Pedido a CEDIS", type="primary"):
+        # El texto del botón cambia dinámicamente según la regla
+        texto_boton = "💾 Enviar Pedido a CEDIS"
+        if st.button(texto_boton, type="primary"):
             pedido_final = df_editado[df_editado['CANTIDAD A PEDIR'] > 0]
             if not pedido_final.empty:
                 with st.spinner("Guardando orden en base de datos segura..."):
+                    # 1. VERIFICAR LOGÍSTICA: ¿Es directo o va a CEDIS?
+                    tipo_entrega = "CEDIS"
+                    # Consultar la tabla de reglas
+                    regla_dsd = supabase.table('entregas_directas').select('id').eq('proveedor', st.session_state.prov_actual).eq('sucursal', st.session_state.sucursal).execute()
+                    if len(regla_dsd.data) > 0:
+                        tipo_entrega = "DIRECTA"
+                
+                    # 2. Crear el folio del pedido en Supabase
                     fecha_hoy = datetime.date.today().strftime("%Y-%m-%d")
                     res_ped = supabase.table('pedidos_pull').insert({
                         "sucursal": st.session_state.sucursal,
                         "proveedor": st.session_state.prov_actual,
                         "fecha_solicitud": fecha_hoy,
-                        "estatus": "En Revisión CEDIS"
+                        "estatus": "En Revisión CEDIS",
+                        "tipo_entrega": tipo_entrega # <--- Guardamos la inteligencia logística
                     }).execute()
                     
                     pedido_id = res_ped.data[0]['id']
                     
+                    # 3. Guardar todos los artículos que pidió el gerente
                     detalles = []
                     for _, row in pedido_final.iterrows():
                         detalles.append({
@@ -600,12 +612,13 @@ with tab_planeacion:
                     
                     supabase.table('pedidos_pull_detalle').insert(detalles).execute()
                     
-                    st.success(f"✅ ¡Pedido enviado a CEDIS exitosamente! (Folio Interno: #{pedido_id})")
+                    # 4. Limpiar pantalla y confirmar
+                    msg_logistica = "CEDIS" if tipo_entrega == "CEDIS" else "ENTREGA DIRECTA"
+                    st.success(f"✅ ¡Pedido guardado exitosamente! (Folio Interno: #{pedido_id} | Logística: {msg_logistica})")
                     st.session_state.mostrar_grid = False
                     st.rerun()
             else: 
                 st.warning("⚠️ No capturaste ninguna cantidad mayor a cero.")
-
 # ------------------------------------------
 # PESTAÑA 4: CARGA DE DATOS (ETL)
 # ------------------------------------------
@@ -677,16 +690,15 @@ with tab_etl:
                     st.warning("⚠️ Sube al menos un archivo de ventas.")
     else: 
         st.warning("No tienes permisos para inyectar bases de datos globales.")
-
 # ------------------------------------------
-# PESTAÑA 5: REGLAS MDM (Diccionario y PKG)
+# PESTAÑA 5: REGLAS MDM (Diccionario, PKG y Logística)
 # ------------------------------------------
 with tab_mdm:
     if st.session_state.permiso_edicion:
         st.subheader("🪢 Gestión de Datos Maestros (MDM)")
-        st.markdown("Corrige registros huérfanos y asigna reglas de empaque (PKG) sin usar Excel.")
+        st.markdown("Corrige registros huérfanos, asigna PKG y define reglas de entrega logística.")
         
-        mdm_tab1, mdm_tab2 = st.tabs(["🚨 Corrección de Huérfanos", "📦 Asignación de PKG y Departamentos"])
+        mdm_tab1, mdm_tab2, mdm_tab3 = st.tabs(["🚨 Corrección de Huérfanos", "📦 Asignación de PKG", "🚚 Logística de Entregas (DSD)"])
         
         with mdm_tab1:
             st.info("El sistema detecta artículos vendidos que no existen en tu catálogo maestro.")
@@ -711,12 +723,12 @@ with tab_mdm:
                         hide_index=True, use_container_width=True
                     )
                     
-                    if st.button("💾 Guardar Correcciones"):
+                    if st.button("💾 Guardar Correcciones", key="btn_huerfanos"):
                         corregidos = edit_huerfanos[edit_huerfanos['SKU_CORRECTO'].astype(str).str.strip() != ""]
                         if not corregidos.empty:
                             datos_insert = [{"sku_viejo": row['SKU_SICAR'], "sku_nuevo": row['SKU_CORRECTO']} for _, row in corregidos.iterrows()]
                             supabase.table('diccionario_mdm').upsert(datos_insert).execute()
-                            st.success(f"✅ {len(corregidos)} registros agregados al diccionario MDM. Ya no serán huérfanos.")
+                            st.success(f"✅ {len(corregidos)} registros agregados al diccionario MDM.")
                             st.rerun()
                 else:
                     st.success("✅ Excelente. No hay registros huérfanos en tu historial de ventas.")
@@ -747,7 +759,7 @@ with tab_mdm:
                     hide_index=True, use_container_width=True
                 )
                 
-                if st.button("💾 Actualizar Catálogo"):
+                if st.button("💾 Actualizar Catálogo", key="btn_catalogo"):
                     cambios = []
                     for i in range(len(edit_cat)):
                         if (edit_cat.loc[i, 'pkg'] != df_catalogo.loc[i, 'pkg']) or (edit_cat.loc[i, 'departamento'] != df_catalogo.loc[i, 'departamento']):
@@ -764,9 +776,45 @@ with tab_mdm:
                         st.info("No se detectaron cambios.")
             else:
                 st.write("Sube el catálogo de SICAR en la pestaña ETL para empezar.")
+                
+        with mdm_tab3:
+            st.info("Define qué proveedores entregan directamente a qué sucursales. Todo lo que no esté aquí, se asume entrega en CEDIS.")
+            
+            c_log1, c_log2 = st.columns([1, 2])
+            with c_log1:
+                with st.form("form_nueva_ruta"):
+                    st.markdown("#### ➕ Agregar Ruta Directa")
+                    # Traemos proveedores y sucursales
+                    res_provs_mdm = supabase.table('proveedores').select('nombre').order('nombre').execute()
+                    provs_list = [p['nombre'] for p in res_provs_mdm.data] if res_provs_mdm.data else []
+                    sucs_list = ["Actopan", "Mixquiahuala", "Pachuca", "Querétaro", "Oaxaca", "Veracruz"]
+                    
+                    sel_prov = st.selectbox("Proveedor", provs_list)
+                    sel_suc = st.selectbox("Sucursal (Destino Directo)", sucs_list)
+                    
+                    if st.form_submit_button("Crear Ruta Directa", type="primary"):
+                        if sel_prov:
+                            try:
+                                supabase.table('entregas_directas').insert({"proveedor": sel_prov, "sucursal": sel_suc}).execute()
+                                st.success(f"✅ Ruta {sel_prov} -> {sel_suc} agregada.")
+                                st.rerun()
+                            except:
+                                st.error("❌ Esta ruta ya existe.")
+            with c_log2:
+                st.markdown("#### 🚚 Rutas de Entrega Directa Activas")
+                res_rutas = supabase.table('entregas_directas').select('*').execute()
+                if res_rutas.data:
+                    df_rutas = pd.DataFrame(res_rutas.data)
+                    st.dataframe(df_rutas[['proveedor', 'sucursal']], hide_index=True, use_container_width=True)
+                    
+                    ruta_borrar = st.selectbox("Eliminar una ruta (Selecciona ID):", df_rutas['id'].tolist(), format_func=lambda x: f"{df_rutas[df_rutas['id']==x]['proveedor'].iloc[0]} -> {df_rutas[df_rutas['id']==x]['sucursal'].iloc[0]}")
+                    if st.button("🗑️ Eliminar Ruta Seleccionada"):
+                        supabase.table('entregas_directas').delete().eq('id', ruta_borrar).execute()
+                        st.rerun()
+                else:
+                    st.write("No hay reglas de entrega directa. Todos los pedidos irán a CEDIS.")
     else:
         st.warning("No tienes permisos para editar los datos maestros.")
-
 # ------------------------------------------
 # PESTAÑA 6: PERFIL
 # ------------------------------------------
