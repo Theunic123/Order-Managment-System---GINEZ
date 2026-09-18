@@ -650,8 +650,42 @@ with tab_torre:
                     st.markdown("---")
                     prov_consolidar = st.selectbox("Selecciona Proveedor a Consolidar:", df_cedis['proveedor'].unique())
                     
-                    if st.button("🔄 Ejecutar MEIO Global y Generar Excel", type="primary"):
-                        st.info("⏳ Próximo Paso: Aquí conectaremos tu función de Asignación Cross-Docking (Fair-Share) y descargará el Excel final.")
+                    if st.button("🔄 Ejecutar Consolidación y Generar Excel", type="primary"):
+                        with st.spinner("Consolidando pedidos y calculando Cross-Docking..."):
+                            # 1. Obtener IDs de los pedidos de ese proveedor
+                            df_pedidos_prov = df_cedis[df_cedis['proveedor'] == prov_consolidar]
+                            ids_pedidos = df_pedidos_prov['id'].tolist()
+                            
+                            # 2. Descargar Detalles, Inventario CEDIS y Catálogo
+                            res_det = supabase.table('pedidos_pull_detalle').select('*').in_('pedido_id', ids_pedidos).execute()
+                            res_inv = supabase.table('inventario_historico').select('id, sku, existencias').eq('sucursal', 'CEDIS').execute()
+                            res_cat = supabase.table('catalogo_maestro').select('*').execute()
+                            
+                            if res_det.data and res_cat.data:
+                                df_detalles = pd.DataFrame(res_det.data)
+                                df_catalogo = pd.DataFrame(res_cat.data)
+                                # Limpiar duplicados históricos de inventario (quedarse con el último registro)
+                                df_inv_cedis = pd.DataFrame(res_inv.data).sort_values(by='id').drop_duplicates(subset=['sku'], keep='last') if res_inv.data else pd.DataFrame(columns=['sku', 'existencias'])
+                                
+                                # 3. Llamar al motor matemático
+                                excel_data = mrp_engine.consolidar_y_generar_excel(prov_consolidar, df_pedidos_prov, df_detalles, df_inv_cedis, df_catalogo)
+                                
+                                # 4. Actualizar estatus en base de datos para que desaparezcan de la bandeja
+                                supabase.table('pedidos_pull').update({"estatus": "Consolidado - OC Creada"}).in_("id", ids_pedidos).execute()
+                                
+                                st.success(f"✅ ¡Consolidación exitosa de {prov_consolidar}!")
+                                
+                                # 5. Mostrar el botón mágico de descarga
+                                st.download_button(
+                                    label="📥 DESCARGAR EXCEL (Pedido y Distribución)",
+                                    data=excel_data,
+                                    file_name=f"Pedido_Consolidado_{prov_consolidar}_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    type="primary"
+                                )
+                            else:
+                                st.error("No se encontraron detalles de artículos para estos pedidos.")
+                                
                 else:
                     st.info("No hay pedidos pendientes para surtir a través de CEDIS.")
                     
@@ -674,7 +708,7 @@ with tab_torre:
             st.success("✅ Bandeja limpia. No hay solicitudes pendientes en la red de sucursales.")
     else:
         st.warning("🔒 Acceso denegado. Esta vista es exclusiva para Planeación en CEDIS.")
-        
+
 # ------------------------------------------
 # PESTAÑA 4: CARGA DE DATOS (ETL)
 # ------------------------------------------
