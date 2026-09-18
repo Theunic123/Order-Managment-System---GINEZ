@@ -208,3 +208,78 @@ def generar_sugerencia_pull(proveedor, l_prov, r_prov, sucursal, df_ventas, df_i
         df_resultado = df_resultado.sort_values(by="Sugerencia Sistema", ascending=False).reset_index(drop=True)
         
     return df_resultado
+
+import io
+
+def consolidar_y_generar_excel(proveedor, df_pedidos, df_detalles, df_inv_cedis, df_catalogo):
+    """
+    Toma los pedidos de las sucursales, descuenta el stock de CEDIS,
+    calcula la necesidad de compra global y genera la Matriz de Cross-Docking.
+    Retorna un archivo Excel en memoria listo para descargar.
+    """
+    # 1. Preparar datos y catálogos
+    df_detalles = df_detalles.merge(df_catalogo[['sku', 'descripcion', 'pkg', 'precio_compra']], on='sku', how='left')
+    df_detalles['pkg'] = df_detalles['pkg'].fillna(1).astype(int)
+    df_detalles['precio_compra'] = df_detalles['precio_compra'].fillna(0.0)
+
+    # 2. Agrupar la necesidad total de la red (Suma de lo que piden todas las sucursales)
+    df_base = df_detalles.groupby(['sku', 'descripcion', 'pkg', 'precio_compra'])['cantidad_pedida'].sum().reset_index()
+    df_base.rename(columns={'cantidad_pedida': 'NECESIDAD_PURA_RED'}, inplace=True)
+
+    # 3. Cruzar con el inventario actual del CEDIS
+    dict_stock_cedis = dict(zip(df_inv_cedis['sku'], df_inv_cedis['existencias']))
+    df_base['STOCK_CEDIS'] = df_base['sku'].map(dict_stock_cedis).fillna(0)
+
+    # 4. Calcular Compra Sugerida (Lo que pide la red menos lo que ya tenemos en CEDIS)
+    df_base['COMPRA_SUGERIDA'] = np.maximum(0, df_base['NECESIDAD_PURA_RED'] - df_base['STOCK_CEDIS'])
+    
+    # Redondear a empaques (PKG)
+    df_base['PIEZAS'] = np.ceil(df_base['COMPRA_SUGERIDA'] / df_base['pkg']) * df_base['pkg']
+    df_base['PAQUETES'] = (df_base['PIEZAS'] / df_base['pkg']).astype(int)
+    df_base['IMPORTE'] = df_base['PIEZAS'] * df_base['precio_compra']
+
+    # Hoja 1: Pedido Global
+    df_pedido = df_base[['sku', 'descripcion', 'pkg', 'PIEZAS', 'PAQUETES', 'precio_compra', 'IMPORTE', 'NECESIDAD_PURA_RED', 'STOCK_CEDIS']].rename(columns={'sku': 'CLAVE'}).sort_values(by='IMPORTE', ascending=False)
+
+    # 5. MATRIZ DE DISTRIBUCIÓN (Cross-Docking con Fair-Share)
+    df_detalles = df_detalles.merge(df_pedidos[['id', 'sucursal']], left_on='pedido_id', right_on='id', how='left')
+    df_detalles['COMPRA_EN_CAMINO'] = df_detalles['sku'].map(dict(zip(df_base['sku'], df_base['PIEZAS']))).fillna(0)
+    df_detalles['STOCK_CEDIS'] = df_detalles['sku'].map(dict_stock_cedis).fillna(0)
+    
+    # Total de piezas disponibles para repartir (Lo que hay + lo que llegará)
+    df_detalles['INV_TOTAL_REPARTIR'] = df_detalles['STOCK_CEDIS'] + df_detalles['COMPRA_EN_CAMINO']
+
+    # Fair Share (Reparto equitativo proporcional)
+    total_need_por_sku = df_detalles.groupby('sku')['cantidad_pedida'].transform('sum')
+    df_detalles['ALLOCATION_RAW'] = np.where(total_need_por_sku > 0, (df_detalles['cantidad_pedida'] / total_need_por_sku) * df_detalles['INV_TOTAL_REPARTIR'], 0)
+    df_detalles['ENVIO_FINAL'] = np.minimum(df_detalles['ALLOCATION_RAW'], df_detalles['cantidad_pedida'])
+    
+    # Redondear envíos al PKG más cercano hacia abajo
+    df_detalles['ENVIO_FINAL'] = np.floor(df_detalles['ENVIO_FINAL'] / df_detalles['pkg']) * df_detalles['pkg']
+
+    # Hoja 2: Matriz Dinámica Pivotada
+    df_pivot = df_detalles.pivot_table(index=['sku', 'descripcion'], columns='sucursal', values='ENVIO_FINAL', fill_value=0).reset_index()
+    df_pivot.rename(columns={'sku': 'CLAVE', 'descripcion': 'DESCRIPCION'}, inplace=True)
+    
+    # 6. Construir el archivo Excel en la memoria RAM
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_pedido.to_excel(writer, sheet_name='PEDIDO CEDIS', index=False)
+        df_pivot.to_excel(writer, sheet_name='DISTRIBUCION', index=False)
+        
+        # Formatos Bonitos (Enterprise Grade)
+        wb = writer.book
+        f_mon = wb.add_format({'num_format': '$#,##0.00'})
+        f_ent = wb.add_format({'num_format': '#,##0'})
+        
+        ws_p = writer.sheets['PEDIDO CEDIS']
+        ws_p.set_column('A:A', 15)
+        ws_p.set_column('B:B', 45)
+        ws_p.set_column('C:E', 12, f_ent)
+        ws_p.set_column('F:G', 14, f_mon)
+
+        ws_d = writer.sheets['DISTRIBUCION']
+        ws_d.set_column('A:A', 15)
+        ws_d.set_column('B:B', 45)
+
+    return output.getvalue()
