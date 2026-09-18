@@ -3,6 +3,8 @@ import numpy as np
 import streamlit as st
 import datetime
 import calendar
+import plotly.express as px
+import plotly.graph_objects as go
 import io
 import os
 import base64
@@ -414,19 +416,20 @@ if "mensaje_exito" in st.session_state:
     st.success(st.session_state.mensaje_exito)
     del st.session_state.mensaje_exito
 
-# PESTAÑAS
-tabs_names = ["📊 Operaciones (Folios)", "📅 Calendario", "🧠 Planeación (Pull)", "🏢 Torre CEDIS", "⚙️ Carga Datos (ETL)", "🪢 Reglas MDM", "👤 Mi Perfil"]
+# PESTAÑAS (Dashboard como página principal)
+tabs_names = ["📈 Dashboard (BI)", "📊 Operaciones (Folios)", "📅 Calendario", "🧠 Planeación (Pull)", "🏢 Torre CEDIS", "⚙️ Carga Datos (ETL)", "🪢 Reglas MDM", "👤 Mi Perfil"]
 if st.session_state.is_admin: tabs_names.append("🛡️ Panel Súper-Admin")
 
 tabs = st.tabs(tabs_names)
-tab_operaciones = tabs[0]
-tab_calendario = tabs[1]
-tab_planeacion = tabs[2]
-tab_torre = tabs[3] # <--- NUEVA PESTAÑA
-tab_etl = tabs[4]
-tab_mdm = tabs[5]
-tab_perfil = tabs[6]
-if st.session_state.is_admin: tab_admin = tabs[7]
+tab_dashboard = tabs[0]
+tab_operaciones = tabs[1]
+tab_calendario = tabs[2]
+tab_planeacion = tabs[3]
+tab_torre = tabs[4]
+tab_etl = tabs[5]
+tab_mdm = tabs[6]
+tab_perfil = tabs[7]
+if st.session_state.is_admin: tab_admin = tabs[8]
 
 # Cargar BD Operaciones
 res_movimientos = supabase.table('movimientos').select('*').eq('"Activo"', 1).execute()
@@ -434,6 +437,165 @@ df_movimientos = pd.DataFrame(res_movimientos.data)
 if df_movimientos.empty:
     df_movimientos = pd.DataFrame(columns=["id", "Folio", "Proveedor", "Fecha", "Estatus", "Entrega", "Recepcion", "Obs", "Destino", "Factura", "Calidad", "Monto", "F_Pago", "Est_Pago", "Tipo_Doc", "Ruta_PDF", "Ruta_Excel", "Ruta_PDF_SinPrecios", "Ruta_Factura", "Activo"])
 
+# ------------------------------------------
+# PESTAÑA 0: DASHBOARD DIRECTIVO (BI)
+# ------------------------------------------
+with tab_dashboard:
+    st.subheader("📈 Control Directivo e Inteligencia de Negocios")
+    
+    # 1. Extracción optimizada de datos (Solo columnas necesarias para no saturar RAM)
+    with st.spinner("Cargando métricas de Data Warehouse..."):
+        res_v_dash = supabase.table('ventas_historicas').select('sucursal, fecha, cantidad, total').execute()
+        res_i_dash = supabase.table('inventario_historico').select('sku, descripcion, sucursal, existencias, total').execute()
+        
+        df_v_dash = pd.DataFrame(res_v_dash.data) if res_v_dash.data else pd.DataFrame()
+        df_i_dash = pd.DataFrame(res_i_dash.data) if res_i_dash.data else pd.DataFrame()
+
+    if not df_v_dash.empty and not df_i_dash.empty:
+        
+        # --- SEGURIDAD POR ROLES (RBAC) ---
+        if st.session_state.permiso_edicion:
+            # Jefes y Admins ven todo y pueden filtrar
+            sucs_disponibles = ["GLOBAL"] + sorted(df_v_dash['sucursal'].unique().tolist())
+            filtro_suc = st.selectbox("🏢 Nivel de Análisis (Sucursal):", sucs_disponibles)
+        else:
+            # Gerentes solo ven su propia sucursal
+            filtro_suc = st.session_state.sucursal
+            st.info(f"📍 Mostrando métricas exclusivas para tu sucursal: **{filtro_suc}**")
+
+        # Aplicar Filtro de Seguridad a la Base de Datos en RAM
+        if filtro_suc != "GLOBAL":
+            # Usamos un filtro parcial por si en BD dice "QRO" y la sucursal es "Querétaro" (los primeros 3 caracteres)
+            prefijo = filtro_suc[:3].upper()
+            df_v_filt = df_v_dash[df_v_dash['sucursal'].str.upper().str.contains(prefijo)]
+            df_i_filt = df_i_dash[df_i_dash['sucursal'].str.upper().str.contains(prefijo)]
+        else:
+            df_v_filt = df_v_dash.copy()
+            df_i_filt = df_i_dash.copy()
+
+        # Validación por si la sucursal del gerente aún no tiene datos
+        if df_v_filt.empty:
+            st.warning("Aún no hay datos históricos procesados para esta sucursal.")
+        else:
+            # Limpieza de Inventario
+            df_i_filt['total'] = pd.to_numeric(df_i_filt['total'], errors='coerce').fillna(0)
+            valor_inventario = df_i_filt['total'].sum()
+            skus_activos = df_i_filt[df_i_filt['existencias'] > 0]['sku'].nunique()
+    
+            # Limpieza de Ventas
+            df_v_filt['fecha'] = pd.to_datetime(df_v_filt['fecha'])
+            df_v_filt['total'] = pd.to_numeric(df_v_filt['total'], errors='coerce').fillna(0)
+            ventas_totales = df_v_filt['total'].sum()
+            tickets_totales = len(df_v_filt)
+    
+            # --- SECCIÓN 1: KPIs FINANCIEROS (TARJETAS) ---
+            st.markdown("### 📊 Indicadores Clave de Rendimiento (KPIs)")
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            kpi1.metric("💰 Ingresos Históricos", f"${ventas_totales:,.2f}")
+            kpi2.metric("📦 Capital Inmovilizado (Stock)", f"${valor_inventario:,.2f}")
+            kpi3.metric("🏷️ SKUs Activos con Stock", f"{skus_activos:,}")
+            kpi4.metric("🧾 Tickets Procesados", f"{tickets_totales:,}")
+            
+            st.markdown("---")
+    
+            # --- SECCIÓN 2: GRÁFICO MAESTRO DE TENDENCIA Y FORECAST ---
+            st.markdown("### 📈 Tendencia Semanal de Ventas y Pronóstico Matemático (Holt-Winters)")
+            
+            # Agrupar ventas por semana y sucursal
+            df_semanal = df_v_filt.groupby(['sucursal', pd.Grouper(key='fecha', freq='W-MON')])['total'].sum().reset_index()
+            
+            # Pivotear para tener Fechas en Y, Sucursales en Columnas
+            df_pivot_w = df_semanal.pivot(index='fecha', columns='sucursal', values='total').fillna(0)
+            
+            # Si el usuario es Jefe y eligió GLOBAL, sumamos todas las líneas
+            if filtro_suc == "GLOBAL":
+                df_pivot_w['GLOBAL (Total Red)'] = df_pivot_w.sum(axis=1)
+    
+            fig_ventas = go.Figure()
+            colores = px.colors.qualitative.Plotly # Paleta profesional
+            
+            # Generar líneas históricas y pronósticos por cada columna filtrada
+            for idx, columna in enumerate(df_pivot_w.columns):
+                serie = df_pivot_w[columna]
+                color_linea = "#E2231A" if columna == 'GLOBAL (Total Red)' else colores[idx % len(colores)]
+                grosor = 4 if columna == 'GLOBAL (Total Red)' else 2
+                
+                # Línea Histórica
+                fig_ventas.add_trace(go.Scatter(
+                    x=serie.index, y=serie.values, 
+                    mode='lines+markers', name=f'Histórico: {columna}',
+                    line=dict(color=color_linea, width=grosor)
+                ))
+                
+                # Línea de Pronóstico (Solo si la sucursal tiene al menos 4 semanas de datos para que la matemática no falle)
+                if len(serie) >= 4:
+                    try:
+                        # Modelo Exponencial Suavizado (Holt) para el Dashboard
+                        modelo = ExponentialSmoothing(serie.values, trend='add', seasonal=None, initialization_method="estimated").fit()
+                        forecast_vals = modelo.forecast(4) # Proyectar 4 semanas al futuro
+                        
+                        # Crear fechas futuras
+                        ultima_fecha = serie.index[-1]
+                        fechas_futuras = [ultima_fecha + pd.Timedelta(weeks=i) for i in range(1, 5)]
+                        
+                        # Conectar la última fecha real con el pronóstico
+                        x_forecast = [ultima_fecha] + fechas_futuras
+                        y_forecast = [serie.values[-1]] + list(forecast_vals)
+                        y_forecast = [max(0, y) for y in y_forecast] # No permitir proyecciones negativas
+                        
+                        fig_ventas.add_trace(go.Scatter(
+                            x=x_forecast, y=y_forecast, 
+                            mode='lines', name=f'Forecast (4 Sem): {columna}',
+                            line=dict(color=color_linea, width=2, dash='dot') # Línea punteada
+                        ))
+                    except: pass
+    
+            fig_ventas.update_layout(
+                xaxis_title="Tiempo (Semanas)",
+                yaxis_title="Ingresos ($ MXN)",
+                hovermode="x unified",
+                plot_bgcolor='rgba(240,240,240,0.5)', # Fondo gris ejecutivo
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=0, r=0, t=50, b=0)
+            )
+            st.plotly_chart(fig_ventas, use_container_width=True)
+    
+            st.markdown("---")
+    
+            # --- SECCIÓN 3: ALERTAS DE CAPITAL Y ROTACIÓN (ABC) ---
+            col_abc1, col_abc2 = st.columns(2)
+            
+            with col_abc1:
+                st.markdown("#### 🚨 Top 10: Capital Inmovilizado (Sobre-Stock)")
+                st.caption("Artículos con mayor valor de inventario almacenado (Dinero congelado).")
+                df_sobrestock = df_i_filt.groupby(['sku', 'descripcion'])['total'].sum().reset_index()
+                df_sobrestock = df_sobrestock.sort_values(by='total', ascending=False).head(10)
+                
+                st.dataframe(
+                    df_sobrestock.rename(columns={'sku': 'SKU', 'descripcion': 'Artículo', 'total': 'Valor en Almacén ($)'}), 
+                    hide_index=True, use_container_width=True,
+                    column_config={"Valor en Almacén ($)": st.column_config.NumberColumn(format="$%.2f")}
+                )
+                
+            with col_abc2:
+                st.markdown("#### 🔥 Top 10: High-Runners (Ventas)")
+                st.caption("Los productos que más ingresos generan. ¡Nunca deben faltar!")
+                df_highrun = df_v_filt.groupby(['sku'])['total'].sum().reset_index()
+                
+                # Inyectar nombres desde el inventario
+                dict_nombres = dict(zip(df_i_dash['sku'], df_i_dash['descripcion']))
+                df_highrun['Artículo'] = df_highrun['sku'].map(dict_nombres).fillna("Desconocido")
+                
+                df_highrun = df_highrun.sort_values(by='total', ascending=False).head(10)
+                st.dataframe(
+                    df_highrun[['sku', 'Artículo', 'total']].rename(columns={'sku': 'SKU', 'total': 'Ingreso Histórico ($)'}), 
+                    hide_index=True, use_container_width=True,
+                    column_config={"Ingreso Histórico ($)": st.column_config.NumberColumn(format="$%.2f")}
+                )
+
+    else:
+        st.info("💡 Sube tus archivos de Inventario y Ventas Históricas en la pestaña 'ETL' para darle vida al Dashboard Ejecutivo.")
+        
 # ------------------------------------------
 # PESTAÑA 1: OPERACIONES
 # ------------------------------------------
@@ -685,7 +847,7 @@ with tab_torre:
                                 )
                             else:
                                 st.error("No se encontraron detalles de artículos para estos pedidos.")
-                                
+
                 else:
                     st.info("No hay pedidos pendientes para surtir a través de CEDIS.")
                     
