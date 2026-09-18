@@ -1,24 +1,35 @@
 import pandas as pd
 import numpy as np
 import re
+import math
+import streamlit as st # Inyectamos Streamlit para mostrar errores reales
 
 def cargar_a_supabase(supabase, tabla, df, batch_size=500):
-    """Convierte el DataFrame y lo sube a Supabase en bloques pequeños para cuidar la RAM."""
+    """Convierte el DataFrame y lo sube a Supabase blindado contra errores de BD."""
     if df.empty: return False
     
-    # BARRERA ANTI-BASURA: Reemplazar NaNs, NaTs e Infinitos por None (Null SQL)
-    df = df.replace([np.nan, np.inf, -np.inf], None)
-    df = df.where(pd.notnull(df), None)
-    
-    datos = df.to_dict(orient='records')
+    # Diccionario puro para evitar que JSON o Supabase rechacen el paquete
+    datos = []
+    for record in df.to_dict('records'):
+        clean_record = {}
+        for k, v in record.items():
+            if pd.isna(v) or v != v:
+                clean_record[k] = None
+            elif isinstance(v, float) and (math.isinf(v) or math.isnan(v)):
+                clean_record[k] = None
+            else:
+                clean_record[k] = v
+        datos.append(clean_record)
     
     try:
+        # Subimos la información en bloques
         for i in range(0, len(datos), batch_size):
             bloque = datos[i:i+batch_size]
             supabase.table(tabla).upsert(bloque).execute()
         return True
     except Exception as e:
-        print(f"Error al subir a Supabase en tabla {tabla}: {e}")
+        # Mostramos el error técnico exacto en la pantalla de la web
+        st.error(f"🚨 Falla en la Base de Datos ({tabla}). Detalle técnico: {str(e)}")
         return False
 
 def limpiar_catalogo_mdm(archivo_catalogo):
@@ -69,7 +80,7 @@ def limpiar_paquetes_bom(archivos_pkg):
     return pd.DataFrame()
 
 def limpiar_ventas(archivos_ventas):
-    """Fase 3: Extrae Tickets de SICAR homologando con expresiones regulares."""
+    """Fase 3: Extrae Tickets de SICAR blindado contra nulos."""
     all_dataframes = []
     for archivo in archivos_ventas:
         try:
@@ -99,7 +110,11 @@ def limpiar_ventas(archivos_ventas):
             
             df['sucursal'] = sucursal
             
-            # --- NUEVA LIMPIEZA FINANCIERA (Filtra $, comas y textos) ---
+            # --- BLINDAJE EXTRA CONTRA RESTRICCIONES DE POSTGRESQL ---
+            if 'folio' in df.columns: df['folio'] = df['folio'].fillna("SIN_FOLIO").astype(str)
+            if 'documento' in df.columns: df['documento'] = df['documento'].fillna("TICKET").astype(str)
+            if 'cliente' in df.columns: df['cliente'] = df['cliente'].fillna("PUBLICO GENERAL").astype(str)
+            
             for col in ['cantidad', 'importe', 'total']:
                 if col in df.columns:
                     df[col] = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
@@ -108,12 +123,14 @@ def limpiar_ventas(archivos_ventas):
             cols_finales = ['sucursal', 'fecha', 'documento', 'folio', 'cliente', 'sku', 'desc_sicar', 'cantidad', 'importe', 'total']
             all_dataframes.append(df[[c for c in cols_finales if c in df.columns]])
         except Exception as e:
-            print(f"Error procesando venta {archivo.name}: {e}")
             continue
             
     if all_dataframes:
         df_master = pd.concat(all_dataframes, ignore_index=True)
-        if 'fecha' in df_master.columns: df_master['fecha'] = pd.to_datetime(df_master['fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
+        if 'fecha' in df_master.columns: 
+            df_master['fecha'] = pd.to_datetime(df_master['fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
+            # Forzar fecha segura para no chocar con SQL DATE NOT NULL
+            df_master['fecha'] = df_master['fecha'].fillna(pd.Timestamp.today().strftime('%Y-%m-%d'))
         return df_master
     return pd.DataFrame()
 
@@ -134,7 +151,6 @@ def limpiar_inventarios(archivos_inv):
             mascara_basura = df['sku'].astype(str).str.contains("Reporte de Inventario|Clave", case=False, na=False)
             df = df[~mascara_basura].copy()
             
-            # --- NUEVA LIMPIEZA FINANCIERA (Para evitar que el dinero en inventario falle) ---
             for col in ['existencias', 'precio_u', 'total']:
                 df[col] = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
