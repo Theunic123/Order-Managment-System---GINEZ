@@ -231,7 +231,7 @@ def modal_nuevo_registro():
             if not folio.strip(): 
                 st.error("⚠️ Folio obligatorio.")
             else:
-                check_folio = supabase.table('movimientos').select('"Folio"').eq('"Folio"', folio).execute()
+                check_folio = supabase.table('movimientos').select('Folio').eq('Folio', folio).execute()
                 if len(check_folio.data) > 0:
                     st.error("❌ El Folio ya existe.")
                 else:
@@ -331,13 +331,13 @@ def modal_editar_registro(df_mov):
                 for key, val in data_update.items():
                     if pd.isna(val): data_update[key] = None
 
-                supabase.table('movimientos').update(data_update).eq('"Folio"', folio_editar).execute()
+                supabase.table('movimientos').update(data_update).eq('Folio', folio_editar).execute()
                 registrar_bitacora(st.session_state.username, "ACTUALIZACIÓN", f"Editó folio {folio_editar}.")
                 st.session_state.mensaje_exito = f"🔄 Movimiento {folio_editar} actualizado."
                 st.rerun()
 
         if st.button("🗑️ Enviar a Papelera", type="primary", use_container_width=True):
-            supabase.table('movimientos').update({"Activo": 0}).eq('"Folio"', folio_editar).execute()
+            supabase.table('movimientos').update({"Activo": 0}).eq('Folio', folio_editar).execute()
             st.session_state.mensaje_exito = f"🗑️ Movimiento {folio_editar} a papelera."
             st.rerun()
 
@@ -432,7 +432,7 @@ tab_perfil = tabs[7]
 if st.session_state.is_admin: tab_admin = tabs[8]
 
 # Cargar BD Operaciones
-res_movimientos = supabase.table('movimientos').select('*').eq('"Activo"', 1).execute()
+res_movimientos = supabase.table('movimientos').select('*').eq('Activo', 1).execute()
 df_movimientos = pd.DataFrame(res_movimientos.data)
 if df_movimientos.empty:
     df_movimientos = pd.DataFrame(columns=["id", "Folio", "Proveedor", "Fecha", "Estatus", "Entrega", "Recepcion", "Obs", "Destino", "Factura", "Calidad", "Monto", "F_Pago", "Est_Pago", "Tipo_Doc", "Ruta_PDF", "Ruta_Excel", "Ruta_PDF_SinPrecios", "Ruta_Factura", "Activo"])
