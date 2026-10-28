@@ -19,6 +19,7 @@ COLUMNAS_VENTA = (
 COLUMNAS_VALIDAS = (*COLUMNAS_VENTA, "archivo", "fila_origen", "hash_archivo", "datos_originales")
 COLUMNAS_RECHAZADAS = ("archivo", "fila_origen", "hash_archivo", "motivos", "datos_originales")
 COLUMNAS_DUPLICADAS = (*COLUMNAS_VALIDAS, "motivo")
+MOTIVO_RECUPERADA = "línea ya guardada en carga parcial del mismo archivo"
 MAPEO_SICAR = {
     "Unnamed: 1": "cantidad", "Column2": "cantidad",
     "Unnamed: 4": "desc_cruda", "Column5": "desc_cruda",
@@ -48,6 +49,7 @@ class VistaPreviaVentas:
     rechazados: pd.DataFrame
     duplicados: pd.DataFrame
     filas_leidas: dict[str, int]
+    bloqueos: list[str]
 
 
 def _vacio(valor):
@@ -192,12 +194,16 @@ def _contenido(fila):
     )
 
 
-def _hash_ya_cargado(supabase, hash_archivo):
-    respuesta = (supabase.table("cargas_etl").select("id")
+def _cargas_del_archivo(supabase, hash_archivo):
+    respuesta = (supabase.table("cargas_etl").select("id,estatus,ubicacion_id")
                  .eq("tipo_reporte", "VENTAS")
-                 .eq("hash_archivo", "\\x" + hash_archivo)
-                 .eq("estatus", "COMPLETADA").limit(1).execute())
-    return bool(respuesta.data)
+                 .eq("hash_archivo", "\\x" + hash_archivo).execute())
+    return respuesta.data or []
+
+
+def _hash_ya_cargado(supabase, hash_archivo):
+    return any(carga["estatus"] == "COMPLETADA"
+               for carga in _cargas_del_archivo(supabase, hash_archivo))
 
 
 def _existentes(supabase, filas):
@@ -208,7 +214,7 @@ def _existentes(supabase, filas):
     for ubicacion_id, fechas in por_ubicacion.items():
         registros = leer_todos(
             supabase, "ventas_historicas",
-            "id,ubicacion_id,fecha,folio,sku,documento,cliente,desc_sicar,cantidad,importe,total",
+            "id,carga_id,ubicacion_id,fecha,folio,sku,documento,cliente,desc_sicar,cantidad,importe,total",
             filtros=(("eq", "ubicacion_id", ubicacion_id),
                      ("gte", "fecha", min(fechas)), ("lte", "fecha", max(fechas))),
         )
@@ -225,58 +231,89 @@ def preparar_vista_previa(supabase, archivos):
             raise ValueError("El mismo archivo fue asignado a dos sucursales")
         unicos.setdefault(archivo.hash_archivo, archivo)
     todas, rechazados, leidas = [], [], {}
-    for archivo in archivos:
+    for archivo in unicos.values():
         validas, invalidas, cantidad = validar_archivo(archivo)
         todas.extend(validas)
         rechazados.extend(invalidas)
         leidas[archivo.hash_archivo] = leidas.get(archivo.hash_archivo, 0) + cantidad
 
-    cargados = {h for h in unicos if _hash_ya_cargado(supabase, h)}
+    cargas = {h: _cargas_del_archivo(supabase, h) for h in unicos}
+    for h, registros in cargas.items():
+        if any(c.get("ubicacion_id") not in (None, unicos[h].ubicacion_id)
+               for c in registros):
+            raise ValueError("El archivo ya tiene otra sucursal en cargas_etl")
+    cargados = {h for h, registros in cargas.items()
+                if any(c["estatus"] == "COMPLETADA" for c in registros)}
+    fallidas = {h: {c["id"] for c in registros if c["estatus"] == "FALLIDA"}
+                for h, registros in cargas.items()}
     existentes = _existentes(supabase, todas) if todas else {}
-    validos, duplicados, vistos = [], [], {}
+    ocurrencias = {}
+    for fila in todas:
+        ocurrencias.setdefault(_clave(fila), set()).add(
+            (fila["hash_archivo"], fila["fila_origen"])
+        )
+    ambiguas = {clave for clave, origenes in ocurrencias.items() if len(origenes) > 1}
+    validos, duplicados, bloqueos = [], [], []
     for fila in todas:
         clave, contenido = _clave(fila), _contenido(fila)
         if fila["hash_archivo"] in cargados:
             duplicados.append({**fila, "motivo": "archivo ya completado"})
-        elif clave in vistos:
-            if vistos[clave] == contenido:
-                duplicados.append({**fila, "motivo": "repetido en los archivos seleccionados"})
-            else:
-                rechazados.append({k: fila[k] for k in COLUMNAS_RECHAZADAS if k != "motivos"} |
-                                   {"motivos": ["misma identidad con valores distintos en los archivos"]})
+        elif clave in ambiguas:
+            rechazados.append({k: fila[k] for k in COLUMNAS_RECHAZADAS if k != "motivos"} |
+                               {"motivos": ["varias líneas con la misma identidad; requiere revisión antes de guardar"]})
+            bloqueos.append(f"{fila['fecha']} / {fila['folio']} / {fila['sku']}")
         elif clave in existentes:
-            if _contenido(existentes[clave]) == contenido:
-                duplicados.append({**fila, "motivo": "ya existe en ventas_historicas"})
+            existente = existentes[clave]
+            if (existente.get("carga_id") in fallidas.get(fila["hash_archivo"], set())
+                    and _contenido(existente) == contenido):
+                duplicados.append({**fila, "motivo": MOTIVO_RECUPERADA})
             else:
                 rechazados.append({k: fila[k] for k in COLUMNAS_RECHAZADAS if k != "motivos"} |
-                                   {"motivos": ["misma identidad existente con valores distintos"]})
+                                   {"motivos": ["identidad ya existente; posible línea legítima de otro archivo"]})
+                bloqueos.append(f"{fila['fecha']} / {fila['folio']} / {fila['sku']}")
         else:
-            vistos[clave] = contenido
             validos.append(fila)
     return VistaPreviaVentas(
         list(unicos.values()), pd.DataFrame(validos, columns=COLUMNAS_VALIDAS),
         pd.DataFrame(rechazados, columns=COLUMNAS_RECHAZADAS),
         pd.DataFrame(duplicados, columns=COLUMNAS_DUPLICADAS), leidas,
+        sorted(set(bloqueos)),
     )
 
 
 def guardar_vista_previa(supabase, vista, usuario, tamano_lote=500):
-    """Guarda solo filas nuevas; la clave única de Postgres detiene carreras concurrentes."""
-    if vista.validos.empty:
-        return 0
+    """Guarda filas nuevas o reanuda una carga fallida sin repetir sus filas."""
+    if vista.bloqueos:
+        raise ValueError("La vista previa contiene identidades ambiguas; revisa el archivo antes de guardar")
     if not 1 <= tamano_lote <= 1000:
         raise ValueError("tamano_lote debe estar entre 1 y 1000")
     filas = vista.validos.to_dict("records")
-    if any(_hash_ya_cargado(supabase, h) for h in {f["hash_archivo"] for f in filas}):
+    recuperadas = vista.duplicados[
+        vista.duplicados["motivo"] == MOTIVO_RECUPERADA
+    ].to_dict("records")
+    if not filas and not recuperadas:
+        return 0
+    hashes = {f["hash_archivo"] for f in filas + recuperadas}
+    if any(_hash_ya_cargado(supabase, h) for h in hashes):
         raise ValueError("Un archivo ya se cargó; vuelve a generar la vista previa")
     existentes = _existentes(supabase, filas)
     if any(_clave(fila) in existentes for fila in filas):
         raise ValueError("Los datos cambiaron; vuelve a generar la vista previa")
+    if recuperadas:
+        existentes_previas = _existentes(supabase, recuperadas)
+        for fila in recuperadas:
+            actual = existentes_previas.get(_clave(fila))
+            fallidas = {c["id"] for c in _cargas_del_archivo(supabase, fila["hash_archivo"])
+                        if c["estatus"] == "FALLIDA"}
+            if (not actual or actual.get("carga_id") not in fallidas
+                    or _contenido(actual) != _contenido(fila)):
+                raise ValueError("La carga parcial cambió; vuelve a generar la vista previa")
 
     insertadas = 0
     for archivo in vista.archivos:
         nuevas = [fila for fila in filas if fila["hash_archivo"] == archivo.hash_archivo]
-        if not nuevas:
+        previas = [fila for fila in recuperadas if fila["hash_archivo"] == archivo.hash_archivo]
+        if not nuevas and not previas:
             continue
         rechazadas = vista.rechazados[
             vista.rechazados["hash_archivo"] == archivo.hash_archivo
@@ -284,7 +321,7 @@ def guardar_vista_previa(supabase, vista, usuario, tamano_lote=500):
         omitidas = len(vista.duplicados[
             vista.duplicados["hash_archivo"] == archivo.hash_archivo
         ])
-        fechas = [fila["fecha"] for fila in nuevas]
+        fechas = [fila["fecha"] for fila in nuevas + previas]
         encabezado = {
             "tipo_reporte": "VENTAS", "nombre_archivo": archivo.nombre,
             "hash_archivo": "\\x" + archivo.hash_archivo,
@@ -292,14 +329,26 @@ def guardar_vista_previa(supabase, vista, usuario, tamano_lote=500):
             "fecha_desde": min(fechas), "fecha_hasta": max(fechas),
             "usuario_referencia": usuario,
             "filas_leidas": vista.filas_leidas[archivo.hash_archivo],
-            "filas_validas": len(nuevas), "filas_rechazadas": len(rechazadas),
+            "filas_validas": len(nuevas) + len(previas), "filas_rechazadas": len(rechazadas),
             "estatus": "EN_PROCESO",
             "detalle_error": f"Duplicados omitidos: {omitidas}" if omitidas else None,
         }
-        respuesta = supabase.table("cargas_etl").insert(encabezado).execute()
-        if not respuesta.data or "id" not in respuesta.data[0]:
-            raise RuntimeError("No se recibió el identificador de la carga ETL")
-        carga_id = respuesta.data[0]["id"]
+        fallidas = [c for c in _cargas_del_archivo(supabase, archivo.hash_archivo)
+                    if c["estatus"] == "FALLIDA"
+                    and c.get("ubicacion_id") in (None, archivo.ubicacion_id)]
+        if len(fallidas) > 1:
+            raise RuntimeError("Hay varias cargas fallidas del mismo archivo; requiere conciliación manual")
+        if fallidas:
+            carga_id = fallidas[0]["id"]
+            supabase.table("cargas_etl").update({
+                campo: valor for campo, valor in encabezado.items()
+                if campo not in ("tipo_reporte", "nombre_archivo", "hash_archivo", "ubicacion_id")
+            }).eq("id", carga_id).execute()
+        else:
+            respuesta = supabase.table("cargas_etl").insert(encabezado).execute()
+            if not respuesta.data or "id" not in respuesta.data[0]:
+                raise RuntimeError("No se recibió el identificador de la carga ETL")
+            carga_id = respuesta.data[0]["id"]
         try:
             ventas = [
                 {**{col: fila[col] for col in COLUMNAS_VENTA}, "carga_id": carga_id}
@@ -310,10 +359,16 @@ def guardar_vista_previa(supabase, vista, usuario, tamano_lote=500):
                     ventas[inicio:inicio + tamano_lote]
                 ).execute()
                 insertadas += len(ventas[inicio:inicio + tamano_lote])
+            rechazos_existentes = {
+                fila["fila_origen"] for fila in leer_todos(
+                    supabase, "cargas_etl_rechazos", "id,fila_origen",
+                    filtros=(("eq", "carga_id", carga_id),),
+                )
+            }
             rechazos = [
                 {"carga_id": carga_id, "fila_origen": fila["fila_origen"],
                  "motivos": fila["motivos"], "datos_originales": fila["datos_originales"]}
-                for fila in rechazadas
+                for fila in rechazadas if fila["fila_origen"] not in rechazos_existentes
             ]
             for inicio in range(0, len(rechazos), tamano_lote):
                 supabase.table("cargas_etl_rechazos").insert(

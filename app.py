@@ -989,8 +989,18 @@ with tab_etl:
                             st.dataframe(vista_ventas.validos.drop(columns=['datos_originales', 'hash_archivo']))
                             st.dataframe(vista_ventas.rechazados[['archivo', 'fila_origen', 'motivos']])
                             st.dataframe(vista_ventas.duplicados[['archivo', 'fila_origen', 'motivo']])
+                            if vista_ventas.bloqueos:
+                                st.error(
+                                    "Hay folios con líneas de identidad ambigua. "
+                                    "No se guardará ninguna venta hasta revisar el archivo SICAR."
+                                )
+                                st.write("Identidades por revisar:", vista_ventas.bloqueos)
+                            hay_recuperacion = (
+                                vista_ventas.duplicados['motivo'] == ventas_etl.MOTIVO_RECUPERADA
+                            ).any()
                             if st.button("Guardar ventas válidas", type="primary",
-                                         disabled=vista_ventas.validos.empty):
+                                         disabled=(vista_ventas.validos.empty and not hay_recuperacion)
+                                         or bool(vista_ventas.bloqueos)):
                                 guardadas = ventas_etl.guardar_vista_previa(
                                     supabase, vista_ventas, st.session_state.username
                                 )
