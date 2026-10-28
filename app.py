@@ -445,7 +445,7 @@ with tab_dashboard:
     
     # 1. Extracción optimizada de datos (Solo columnas necesarias para no saturar RAM)
     with st.spinner("Cargando métricas de Data Warehouse..."):
-        res_v_dash = supabase.table('ventas_historicas').select('sucursal, fecha, cantidad, total').execute()
+        res_v_dash = supabase.table('ventas_historicas').select('sku, sucursal, fecha, cantidad, total').execute()
         res_i_dash = supabase.table('inventario_historico').select('sku, descripcion, sucursal, existencias, total').execute()
         
         df_v_dash = pd.DataFrame(res_v_dash.data) if res_v_dash.data else pd.DataFrame()
