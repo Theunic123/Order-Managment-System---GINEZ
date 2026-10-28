@@ -123,6 +123,9 @@ def validar_archivo(archivo):
         raise ValueError(f"Faltan columnas SICAR en {archivo.nombre}: {', '.join(sorted(faltantes))}")
 
     original = bruto.copy()
+    if "documento" in bruto:
+        encabezado_ticket = bruto["fecha"].notna() & bruto["folio"].notna()
+        bruto["documento"] = bruto["documento"].where(encabezado_ticket)
     for nombre in ("fecha", "folio", "cliente", "documento"):
         if nombre not in bruto:
             bruto[nombre] = None

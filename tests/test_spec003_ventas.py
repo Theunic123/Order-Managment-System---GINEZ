@@ -284,6 +284,33 @@ class VentasSicarTests(unittest.TestCase):
         self.assertEqual(sum(Decimal(f["cantidad"]) for f in validas), Decimal("5"))
         self.assertEqual(sum(Decimal(f["total"]) for f in validas), Decimal("1244.75"))
 
+    def test_documento_proviene_del_encabezado_no_de_la_unidad(self):
+        archivo = archivo_de_prueba([
+            {"Fecha": "27/10/2026", "Folio": "A1", "Documento": "Ticket",
+             "Total   ": 100, "Unnamed: 1": None, "Unnamed: 4": None},
+            {"Fecha": None, "Folio": None, "Documento": "PZA",
+             "Unnamed: 1": 2, "Unnamed: 4": "Producto [SKU1]", "Unnamed: 27": 100},
+        ])
+        validas, rechazadas, _ = validar_archivo(archivo)
+        self.assertEqual(len(validas), 1)
+        self.assertFalse(rechazadas)
+        self.assertEqual(validas[0]["documento"], "Ticket")
+
+    def test_detalle_suma_total_del_folio_y_rechaza_pie(self):
+        archivo = archivo_de_prueba([
+            {"Fecha": "27/10/2026", "Folio": "A1", "Documento": "Ticket",
+             "Total   ": 30},
+            {"Documento": "PZA", "Unnamed: 1": 1, "Unnamed: 4": "Uno [SKU1]",
+             "Unnamed: 27": 10},
+            {"Documento": "PZA", "Unnamed: 1": 2, "Unnamed: 4": "Dos [SKU2]",
+             "Unnamed: 27": 20},
+            {"Documento": "Página 1", "Unnamed: 1": "Total", "Unnamed: 4": "Resumen"},
+        ])
+        validas, rechazadas, _ = validar_archivo(archivo)
+        self.assertEqual(len(validas), 2)
+        self.assertEqual(len(rechazadas), 1)
+        self.assertEqual(sum(Decimal(f["total"]) for f in validas), Decimal("30"))
+
     def test_paginacion_supera_mil(self):
         base = SupabaseFalso(ventas_historicas=[{"id": i} for i in range(1501)])
         filas = leer_todos(base, "ventas_historicas", "id")
