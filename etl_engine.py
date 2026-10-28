@@ -73,59 +73,8 @@ def limpiar_paquetes_bom(archivos_pkg):
     return pd.DataFrame()
 
 def limpiar_ventas(archivos_ventas):
-    """Fase 3: Extrae Tickets de SICAR blindado contra nulos."""
-    all_dataframes = []
-    for archivo in archivos_ventas:
-        try:
-            nombre = archivo.name.upper()
-            sucursal = nombre.split('_')[1] if '_' in nombre else 'DESC'
-
-            df = pd.read_excel(archivo, sheet_name='GeneralV', skiprows=5)
-            column_mapping = {
-                'Unnamed: 1': 'cantidad', 'Unnamed: 4': 'desc_cruda',
-                'Unnamed: 19': 'importe', 'Unnamed: 27': 'total',
-                'Column2': 'cantidad', 'Column5': 'desc_cruda',
-                'Column20': 'importe', 'Column28': 'total',
-                'Fecha': 'fecha', 'Folio': 'folio', 'Cliente': 'cliente', 'Documento': 'documento'
-            }
-            df = df.rename(columns=column_mapping)
-
-            cols_to_fill = ['fecha', 'folio', 'cliente']
-            exist_cols = [c for c in cols_to_fill if c in df.columns]
-            df[exist_cols] = df[exist_cols].ffill()
-
-            if 'cantidad' in df.columns: df = df.dropna(subset=['cantidad'])
-            else: continue
-
-            if 'desc_cruda' in df.columns:
-                df['sku'] = df['desc_cruda'].str.extract(r'\[(.*?)\]')[0].fillna('SIN_SKU')
-                df['desc_sicar'] = df['desc_cruda'].str.replace(r'\[.*?\]', '', regex=True).str.strip()
-
-            df['sucursal'] = sucursal
-
-            # --- BLINDAJE EXTRA CONTRA RESTRICCIONES DE POSTGRESQL ---
-            if 'folio' in df.columns: df['folio'] = df['folio'].fillna("SIN_FOLIO").astype(str)
-            if 'documento' in df.columns: df['documento'] = df['documento'].fillna("TICKET").astype(str)
-            if 'cliente' in df.columns: df['cliente'] = df['cliente'].fillna("PUBLICO GENERAL").astype(str)
-
-            for col in ['cantidad', 'importe', 'total']:
-                if col in df.columns:
-                    df[col] = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
-                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-
-            cols_finales = ['sucursal', 'fecha', 'documento', 'folio', 'cliente', 'sku', 'desc_sicar', 'cantidad', 'importe', 'total']
-            all_dataframes.append(df[[c for c in cols_finales if c in df.columns]])
-        except Exception as e:
-            continue
-
-    if all_dataframes:
-        df_master = pd.concat(all_dataframes, ignore_index=True)
-        if 'fecha' in df_master.columns:
-            df_master['fecha'] = pd.to_datetime(df_master['fecha'], errors='coerce').dt.strftime('%Y-%m-%d')
-            # Forzar fecha segura para no chocar con SQL DATE NOT NULL
-            df_master['fecha'] = df_master['fecha'].fillna(pd.Timestamp.today().strftime('%Y-%m-%d'))
-        return df_master
-    return pd.DataFrame()
+    """Ruta heredada deshabilitada; usar la vista previa auditada de ventas_etl."""
+    raise RuntimeError("Usa ventas_etl.preparar_vista_previa para validar ventas SICAR")
 
 def limpiar_inventarios(archivos_inv):
     """Fase 2: Consolida existencias dinámicamente."""

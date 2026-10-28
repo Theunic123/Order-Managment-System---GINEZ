@@ -11,6 +11,8 @@ import base64
 import hashlib
 import etl_engine
 import mrp_engine 
+import ventas_etl
+from data_access import leer_todos
 from supabase import create_client, Client
 
 # --- LIBRERÍAS MATEMÁTICAS ---
@@ -45,6 +47,14 @@ def init_connection():
     return create_client(url, key)
 
 supabase: Client = init_connection()
+
+@st.cache_data(ttl=300)
+def cargar_datos_dashboard():
+    return (
+        leer_todos(supabase, 'ventas_historicas', 'sku, sucursal, fecha, cantidad, total'),
+        leer_todos(supabase, 'inventario_historico',
+                   'id, sku, descripcion, sucursal, existencias, total'),
+    )
 
 # ==========================================
 # FUNCIONES DE SEGURIDAD Y HASHING
@@ -445,11 +455,9 @@ with tab_dashboard:
     
     # 1. Extracción optimizada de datos (Solo columnas necesarias para no saturar RAM)
     with st.spinner("Cargando métricas de Data Warehouse..."):
-        res_v_dash = supabase.table('ventas_historicas').select('sku, sucursal, fecha, cantidad, total').execute()
-        res_i_dash = supabase.table('inventario_historico').select('sku, descripcion, sucursal, existencias, total').execute()
-        
-        df_v_dash = pd.DataFrame(res_v_dash.data) if res_v_dash.data else pd.DataFrame()
-        df_i_dash = pd.DataFrame(res_i_dash.data) if res_i_dash.data else pd.DataFrame()
+        ventas_dash, inventario_dash = cargar_datos_dashboard()
+        df_v_dash = pd.DataFrame(ventas_dash) if ventas_dash else pd.DataFrame()
+        df_i_dash = pd.DataFrame(inventario_dash) if inventario_dash else pd.DataFrame()
 
     if not df_v_dash.empty and not df_i_dash.empty:
         
@@ -709,13 +717,16 @@ with tab_planeacion:
 
     if calcular:
         with st.spinner("Analizando volatilidad y ejecutando torneo FVA (Syntetos-Boylan / XGBoost)..."):
-            res_v = supabase.table('ventas_historicas').select('sku, desc_sicar, sucursal, fecha, cantidad').execute()
-            res_i = supabase.table('inventario_historico').select('id, sku, sucursal, existencias').execute()
-            res_c = supabase.table('catalogo_maestro').select('sku, departamento, pkg').execute()
-            
-            df_ventas = pd.DataFrame(res_v.data) if res_v.data else pd.DataFrame()
-            df_inv = pd.DataFrame(res_i.data) if res_i.data else pd.DataFrame()
-            df_cat = pd.DataFrame(res_c.data) if res_c.data else pd.DataFrame()
+            ventas = leer_todos(supabase, 'ventas_historicas',
+                                'id, sku, desc_sicar, sucursal, fecha, cantidad')
+            inventario = leer_todos(supabase, 'inventario_historico',
+                                    'id, sku, sucursal, existencias')
+            catalogo = leer_todos(supabase, 'catalogo_maestro',
+                                  'sku, departamento, pkg', ordenar_por='sku')
+
+            df_ventas = pd.DataFrame(ventas) if ventas else pd.DataFrame()
+            df_inv = pd.DataFrame(inventario) if inventario else pd.DataFrame()
+            df_cat = pd.DataFrame(catalogo) if catalogo else pd.DataFrame()
             
             if not df_ventas.empty and not df_inv.empty and not df_cat.empty:
                 df_resultado = mrp_engine.generar_sugerencia_pull(prov_input, l_prov, r_prov, st.session_state.sucursal, df_ventas, df_inv, df_cat)
@@ -929,17 +940,67 @@ with tab_etl:
             
             st.markdown("#### 4. Ventas Históricas")
             ventas_files = st.file_uploader("Tickets Semanales", accept_multiple_files=True, type=["xls", "xlsx"])
-            
-            if st.button("Procesar Ventas", type="primary"):
-                if ventas_files:
-                    with st.spinner("Estructurando historial de demanda..."):
-                        df_ventas = etl_engine.limpiar_ventas(ventas_files)
-                        if not df_ventas.empty:
-                            exito = etl_engine.cargar_a_supabase(supabase, 'ventas_historicas', df_ventas)
-                            if exito: st.success(f"✅ Demanda transaccional guardada: {len(df_ventas)} tickets procesados.")
-                            else: st.error("❌ Error al subir las ventas.")
-                else:
-                    st.warning("⚠️ Sube al menos un archivo de ventas.")
+            if ventas_files:
+                try:
+                    ubicaciones_ventas = leer_todos(
+                        supabase, 'ubicaciones', 'id,nombre,tipo'
+                    )
+                    sucursales_ventas = {
+                        fila['nombre']: fila for fila in ubicaciones_ventas
+                        if fila['tipo'] == 'SUCURSAL'
+                    }
+                    if not sucursales_ventas:
+                        st.error("No hay sucursales registradas para la carga de ventas.")
+                    else:
+                        archivos_ventas = []
+                        for numero, archivo in enumerate(ventas_files):
+                            sucursal_venta = st.selectbox(
+                                f"Sucursal de {archivo.name} ({numero + 1})",
+                                list(sucursales_ventas), index=None,
+                                placeholder="Selecciona la sucursal del archivo",
+                                key=f"sucursal_ventas_{numero}",
+                            )
+                            if sucursal_venta:
+                                archivos_ventas.append(ventas_etl.ArchivoVentas(
+                                    archivo.name, archivo.getvalue(),
+                                    sucursales_ventas[sucursal_venta]['id'],
+                                    sucursal_venta,
+                                ))
+                        firma_ventas = tuple(
+                            (archivo.hash_archivo, archivo.ubicacion_id)
+                            for archivo in archivos_ventas
+                        ) if len(archivos_ventas) == len(ventas_files) else None
+                        if st.session_state.get('firma_previa_ventas') != firma_ventas:
+                            st.session_state.pop('vista_previa_ventas', None)
+                        if st.button("Previsualizar ventas", disabled=firma_ventas is None):
+                            with st.spinner("Validando ventas y duplicados..."):
+                                vista_ventas = ventas_etl.preparar_vista_previa(
+                                    supabase, archivos_ventas
+                                )
+                            st.session_state.vista_previa_ventas = vista_ventas
+                            st.session_state.firma_previa_ventas = firma_ventas
+                        vista_ventas = st.session_state.get('vista_previa_ventas')
+                        if vista_ventas is not None and st.session_state.get('firma_previa_ventas') == firma_ventas:
+                            st.write(
+                                f"Válidos: {len(vista_ventas.validos)} · "
+                                f"Rechazados: {len(vista_ventas.rechazados)} · "
+                                f"Duplicados: {len(vista_ventas.duplicados)}"
+                            )
+                            st.dataframe(vista_ventas.validos.drop(columns=['datos_originales', 'hash_archivo']))
+                            st.dataframe(vista_ventas.rechazados[['archivo', 'fila_origen', 'motivos']])
+                            st.dataframe(vista_ventas.duplicados[['archivo', 'fila_origen', 'motivo']])
+                            if st.button("Guardar ventas válidas", type="primary",
+                                         disabled=vista_ventas.validos.empty):
+                                guardadas = ventas_etl.guardar_vista_previa(
+                                    supabase, vista_ventas, st.session_state.username
+                                )
+                                st.session_state.pop('vista_previa_ventas', None)
+                                cargar_datos_dashboard.clear()
+                                st.success(f"Ventas guardadas: {guardadas}")
+                except Exception as exc:
+                    st.error(f"No se pudo procesar la carga de ventas: {exc}")
+            else:
+                st.info("Sube un archivo SICAR y selecciona su sucursal para previsualizarlo.")
     else: 
         st.warning("No tienes permisos para inyectar bases de datos globales.")
 # ------------------------------------------
@@ -954,14 +1015,14 @@ with tab_mdm:
         
         with mdm_tab1:
             st.info("El sistema detecta artículos vendidos que no existen en tu catálogo maestro.")
-            v_res = supabase.table('ventas_historicas').select('sku, desc_sicar').execute()
-            c_res = supabase.table('catalogo_maestro').select('sku').execute()
-            d_res = supabase.table('diccionario_mdm').select('sku_viejo').execute()
+            ventas_mdm = leer_todos(supabase, 'ventas_historicas', 'id, sku, desc_sicar')
+            catalogo_mdm = leer_todos(supabase, 'catalogo_maestro', 'sku', ordenar_por='sku')
+            diccionario_mdm = leer_todos(supabase, 'diccionario_mdm', 'id, sku_viejo')
             
-            if v_res.data:
-                df_v = pd.DataFrame(v_res.data).drop_duplicates(subset=['sku'])
-                df_c = pd.DataFrame(c_res.data) if c_res.data else pd.DataFrame(columns=['sku'])
-                df_d = pd.DataFrame(d_res.data) if d_res.data else pd.DataFrame(columns=['sku_viejo'])
+            if ventas_mdm:
+                df_v = pd.DataFrame(ventas_mdm).drop_duplicates(subset=['sku'])
+                df_c = pd.DataFrame(catalogo_mdm) if catalogo_mdm else pd.DataFrame(columns=['sku'])
+                df_d = pd.DataFrame(diccionario_mdm) if diccionario_mdm else pd.DataFrame(columns=['sku_viejo'])
                 
                 if not df_c.empty: df_v = df_v[~df_v['sku'].isin(df_c['sku'])]
                 if not df_d.empty: df_v = df_v[~df_v['sku'].isin(df_d['sku_viejo'])]
