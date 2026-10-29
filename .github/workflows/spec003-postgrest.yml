@@ -1,8 +1,6 @@
 name: SPEC-003 PostgreSQL y PostgREST
 
 on:
-  push:
-    branches: [feat/spec-003-ventas-sicar-20261028]
   pull_request:
     branches: [main]
 

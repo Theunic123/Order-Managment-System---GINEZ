@@ -56,7 +56,8 @@ CREATE TABLE public.cargas_etl_rechazos (
 );
 
 INSERT INTO public.ubicaciones (id, nombre, tipo)
-VALUES (4, 'Querétaro', 'SUCURSAL');
+VALUES (1, 'Mixquiahuala', 'SUCURSAL'),
+       (4, 'Querétaro', 'SUCURSAL');
 
 GRANT USAGE ON SCHEMA public TO web_anon;
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO web_anon;
