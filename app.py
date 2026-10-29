@@ -12,6 +12,7 @@ import hashlib
 import etl_engine
 import mrp_engine 
 import ventas_etl
+from acceso_etl import puede_acceder_etl
 from data_access import leer_todos
 from supabase import create_client, Client
 
@@ -886,7 +887,7 @@ with tab_torre:
 # PESTAÑA 4: CARGA DE DATOS (ETL)
 # ------------------------------------------
 with tab_etl:
-    if st.session_state.sucursal == 'CEDIS' or st.session_state.is_admin:
+    if puede_acceder_etl(st.session_state.rol, st.session_state.sucursal):
         st.subheader("⚙️ Procesamiento de Datos (ETL)")
         st.markdown("El motor de limpieza procesará los Excels en la memoria RAM y los enviará normalizados a la Base de Datos.")
         
