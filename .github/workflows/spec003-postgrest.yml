@@ -1,0 +1,77 @@
+name: SPEC-003 PostgreSQL y PostgREST
+
+on:
+  push:
+    branches: [feat/spec-003-ventas-sicar-20261028]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ventas-sicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt
+
+      - name: Compilar y ejecutar pruebas existentes
+        run: |
+          python -m py_compile app.py etl_engine.py ventas_etl.py data_access.py
+          python -m unittest discover -s tests -v
+
+      - name: Iniciar PostgreSQL 17.6 y PostgREST 14.12 aislados
+        shell: bash
+        run: |
+          docker network create spec003-ci
+          docker run -d --name spec003-pg --network spec003-ci \
+            -e POSTGRES_DB=spec003 \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=spec003-ci-only \
+            -v "$PWD/tests/spec003_schema.sql:/docker-entrypoint-initdb.d/001-spec003.sql:ro" \
+            postgres:17.6
+
+          for intento in $(seq 1 60); do
+            if docker exec spec003-pg psql -U postgres -d spec003 -Atqc \
+              "SELECT to_regclass('public.cargas_etl')" 2>/dev/null | grep -q cargas_etl; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec spec003-pg psql -U postgres -d spec003 -Atqc \
+            "SELECT to_regclass('public.cargas_etl')" | grep -q cargas_etl
+
+          docker run -d --name spec003-api --network spec003-ci \
+            -p 127.0.0.1:3000:3000 \
+            -e PGRST_DB_URI=postgres://postgres:spec003-ci-only@spec003-pg:5432/spec003 \
+            -e PGRST_DB_SCHEMAS=public \
+            -e PGRST_DB_ANON_ROLE=web_anon \
+            -e PGRST_SERVER_PORT=3000 \
+            postgrest/postgrest:v14.12
+          curl --retry 30 --retry-delay 2 --retry-connrefused -fsS \
+            'http://127.0.0.1:3000/ubicaciones?select=id&limit=1' >/dev/null
+
+      - name: Probar ventas_etl por HTTP real
+        env:
+          SPEC003_POSTGREST_URL: http://127.0.0.1:3000
+        run: python -m unittest discover -s tests -p 'integration_spec003_http.py' -v
+
+      - name: Mostrar logs del servicio si falla
+        if: failure()
+        run: |
+          docker logs spec003-pg || true
+          docker logs spec003-api || true
+
+      - name: Retirar contenedores aislados
+        if: always()
+        run: |
+          docker rm -f spec003-api spec003-pg 2>/dev/null || true
+          docker network rm spec003-ci 2>/dev/null || true
